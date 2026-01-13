@@ -41,6 +41,8 @@ io.on("connection", (socket) => {
   });
 });
 
-server.listen(3000, () => {
-  console.log("DACUM Backend running");
+const PORT = process.env.PORT || 3000;
+
+server.listen(PORT, () => {
+  console.log("DACUM Backend running on port", PORT);
 });
