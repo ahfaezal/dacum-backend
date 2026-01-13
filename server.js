@@ -25,6 +25,12 @@ app.get("/", (req, res) => {
 });
 
 /**
+ * =========================
+ * FASA 1: CARDS API (MVP)
+ * =========================
+ */
+
+/**
  * GET cards for a session
  * Frontend calls: GET `${API_BASE}/cards/${session}`
  */
@@ -96,45 +102,49 @@ app.post("/submit", (req, res) => {
 });
 
 /**
- * ====== FASA 2: CLUSTER DACUM TASKS (MVP v1) ======
+ * =========================
+ * FASA 2: CLUSTER DACUM TASKS (MVP v1)
+ * =========================
  * Endpoint:
  *   POST /cluster/:session
  *
  * Output:
  *   {
+ *     success: true,
  *     session: "dacum-demo",
+ *     totalCards: 5,
  *     clusters: [
  *       { title: "...", tasks: ["...", "..."] }
  *     ]
  *   }
  *
  * Nota:
- * - Ini clustering ringkas (rule-based) untuk mula susun aktiviti.
- * - Lepas ini kita boleh upgrade kepada AI clustering.
+ * - Clustering ringkas (rule-based) untuk mula susun aktiviti.
+ * - Lepas ini boleh upgrade kepada AI clustering.
  */
 app.post("/cluster/:session", (req, res) => {
   const session = req.params.session;
   const cards = sessions[session] || [];
 
   if (!cards.length) {
-    return res.status(400).json({ success: false, error: "No cards to cluster" });
+    return res
+      .status(400)
+      .json({ success: false, error: "No cards to cluster" });
   }
 
-  // Grouping rule-based (boleh tambah rules ikut bidang)
   const groups = {};
 
   for (const c of cards) {
     const text = (c.activity || "").toLowerCase();
-
     let key = "Lain-lain";
 
-    // Rules contoh (boleh ubah ikut NOSS Pengurusan Masjid)
+    // Rules contoh (boleh ubah ikut bidang/NOSS)
     if (text.includes("jadual") || text.includes("schedule")) key = "Pengurusan Jadual";
     else if (text.includes("imam")) key = "Pengurusan Imam";
     else if (text.includes("bilal")) key = "Pengurusan Bilal";
-    else if (text.includes("kariah") || text.includes("jemaah")) key = "Pengurusan Kariah/Jemaah";
-    else if (text.includes("kewangan") || text.includes("akaun") || text.includes("bayaran")) key = "Pengurusan Kewangan";
-    else if (text.includes("program") || text.includes("aktiviti") || text.includes("majlis")) key = "Pengurusan Program";
+    else if (text.includes("kehadiran") || text.includes("jemaah") || text.includes("attendance")) key = "Pengurusan Kehadiran/Jemaah";
+    else if (text.includes("kewangan") || text.includes("finance") || text.includes("akaun") || text.includes("bayaran")) key = "Pengurusan Kewangan";
+    else if (text.includes("program") || text.includes("kuliah") || text.includes("event") || text.includes("majlis")) key = "Pengurusan Program";
     else if (text.includes("aset") || text.includes("inventori") || text.includes("peralatan")) key = "Pengurusan Aset/Inventori";
     else if (text.includes("penyelenggaraan") || text.includes("maintenance")) key = "Penyelenggaraan";
 
@@ -147,7 +157,72 @@ app.post("/cluster/:session", (req, res) => {
     tasks: groups[title]
   }));
 
-  return res.json({ success: true, session, totalCards: cards.length, clusters });
+  return res.json({
+    success: true,
+    session,
+    totalCards: cards.length,
+    clusters
+  });
+});
+
+/**
+ * =========================
+ * FASA 3: AUTO COMPETENCY UNIT (CU) GENERATOR (ENGLISH)
+ * =========================
+ * Endpoint:
+ *   POST /cu/:session
+ *
+ * Output:
+ *   {
+ *     success: true,
+ *     session: "dacum-demo",
+ *     totalCU: 4,
+ *     CU: [
+ *       { code:"CU01", title:"...", description:"...", tasks:[...] }
+ *     ]
+ *   }
+ */
+app.post("/cu/:session", (req, res) => {
+  const session = req.params.session;
+  const cards = sessions[session] || [];
+
+  if (!cards.length) {
+    return res.status(400).json({ success: false, error: "No cards available" });
+  }
+
+  // Grouping (English labels)
+  const groups = {};
+
+  for (const c of cards) {
+    const text = (c.activity || "").toLowerCase();
+    let key = "General Operations";
+
+    if (text.includes("schedule") || text.includes("jadual")) key = "Scheduling Management";
+    else if (text.includes("imam")) key = "Imam Management";
+    else if (text.includes("bilal")) key = "Bilal Management";
+    else if (text.includes("attendance") || text.includes("kehadiran") || text.includes("jemaah")) key = "Congregation Attendance";
+    else if (text.includes("finance") || text.includes("kewangan") || text.includes("akaun") || text.includes("bayaran")) key = "Financial Management";
+    else if (text.includes("program") || text.includes("kuliah") || text.includes("event") || text.includes("majlis")) key = "Programme Management";
+    else if (text.includes("asset") || text.includes("aset") || text.includes("inventori") || text.includes("peralatan")) key = "Asset & Inventory Management";
+    else if (text.includes("maintenance") || text.includes("penyelenggaraan")) key = "Facilities Maintenance";
+
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(c.activity);
+  }
+
+  const CU = Object.keys(groups).map((key, index) => ({
+    code: `CU${String(index + 1).padStart(2, "0")}`,
+    title: key,
+    description: `Perform tasks related to ${key.toLowerCase()} to ensure effective and efficient mosque operations.`,
+    tasks: groups[key]
+  }));
+
+  return res.json({
+    success: true,
+    session,
+    totalCU: CU.length,
+    CU
+  });
 });
 
 // Socket events
