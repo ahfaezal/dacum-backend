@@ -125,7 +125,9 @@ app.patch("/cards/:session/:id", (req, res) => {
 
 /**
  * ======================================================
- * LALUAN B: MySPIKE Comparator (Parse WA + Compare)
+ * LALUAN B: MySPIKE Comparator (CP -> JD -> WA)
+ * WA di MySPIKE: "Objektif Pembelajaran" (senarai 1..n)
+ * WS/PC tidak dipaparkan dalam MySPIKE untuk kes ini.
  * ======================================================
  */
 
@@ -175,10 +177,18 @@ function extractCpId(url) {
   }
 }
 
-/**
- * Parse MySPIKE CP page -> extract WA list (best-effort).
- */
-async function parseMySpikeWA(url) {
+// Extract "id" param dari URL (untuk JD pun sama)
+function extractAnyId(url) {
+  try {
+    const u = new URL(url);
+    return u.searchParams.get("id");
+  } catch {
+    const m = String(url).match(/id=(\d+)/);
+    return m ? m[1] : null;
+  }
+}
+
+async function httpGetHtml(url) {
   const resp = await axios.get(url, {
     timeout: 20000,
     headers: {
@@ -187,81 +197,149 @@ async function parseMySpikeWA(url) {
       Accept: "text/html,application/xhtml+xml",
     },
   });
+  return resp.data;
+}
 
-  const html = resp.data;
+/**
+ * JD page -> extract WA dari "Objektif Pembelajaran"
+ */
+async function parseMySpikeJDForWA(jdUrl) {
+  const html = await httpGetHtml(jdUrl);
   const $ = cheerio.load(html);
 
-  const pageTitle =
+  const title =
     $("h1").first().text().trim() ||
     $("title").text().trim() ||
-    `CP ${extractCpId(url) || ""}`.trim();
+    `JD ${extractAnyId(jdUrl) || ""}`.trim();
 
-  let candidates = [];
+  let wa = [];
 
-  // 1) Cari dalam table row yang ada petunjuk WA
-  $("table tr").each((_, tr) => {
-    const cells = $(tr).find("td,th");
-    const texts = [];
-    cells.each((__, c) => texts.push($(c).text().replace(/\s+/g, " ").trim()));
-    const rowText = texts.join(" | ");
+  // Cari row yang label dia "Objektif Pembelajaran"
+  $("tr").each((_, tr) => {
+    const tds = $(tr).find("td,th");
+    if (!tds || tds.length < 2) return;
 
-    if (/(work\s*activity|aktiviti\s*kerja|\bwa\b)/i.test(rowText)) {
-      const last = texts[texts.length - 1] || "";
-      if (last && last.length > 4) candidates.push(last);
+    const left = $(tds[0]).text().replace(/\s+/g, " ").trim();
+    if (/Objektif Pembelajaran/i.test(left)) {
+      const rightCell = $(tds[1]);
+
+      // Jika wujud list <ol><li> atau <ul><li>
+      const li = rightCell.find("ol li, ul li");
+      if (li.length) {
+        li.each((__, x) => {
+          const text = $(x).text().replace(/\s+/g, " ").trim();
+          if (text) wa.push(text);
+        });
+      } else {
+        // Fallback: parse format "1. ..." "2. ..."
+        const raw = rightCell.text().replace(/\s+/g, " ").trim();
+        const parts = raw.split(/\s(?=\d+\.)/g).map((s) => s.trim());
+        for (const p of parts) {
+          const cleaned = p.replace(/^\d+\.\s*/, "").trim();
+          if (cleaned && cleaned.length >= 4) wa.push(cleaned);
+        }
+      }
     }
   });
 
-  // 2) Fallback: list item
-  if (candidates.length < 3) {
-    $("li").each((_, li) => {
-      const t = $(li).text().replace(/\s+/g, " ").trim();
-      if (
-        t.length >= 12 &&
-        t.length <= 180 &&
-        !/cookie|privacy|copyright/i.test(t)
-      ) {
-        candidates.push(t);
-      }
-    });
-  }
-
-  // 3) Fallback: text lines
-  if (candidates.length < 3) {
-    const bodyText = $("body").text().replace(/\r/g, "\n");
-    const lines = bodyText
-      .split("\n")
-      .map((l) => l.replace(/\s+/g, " ").trim())
-      .filter(Boolean);
-
-    for (const l of lines) {
-      if (l.length >= 12 && l.length <= 180 && !/login|daftar|carian/i.test(l)) {
-        candidates.push(l);
-      }
-    }
-  }
-
-  // Clean + dedupe
-  const dedup = [];
+  // Dedupe
   const seen = new Set();
-  for (const c of candidates) {
-    const n = normalizeText(c);
-    if (!n || n === "work activity" || n === "aktiviti kerja") continue;
-    if (seen.has(n)) continue;
-    seen.add(n);
-    dedup.push(c.trim());
-  }
+  wa = wa.filter((x) => {
+    const k = normalizeText(x);
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  return { jdUrl, jdId: extractAnyId(jdUrl), title, wa };
+}
+
+/**
+ * CP page -> collect semua link JD (r=umum-noss/view&id=XXXX)
+ */
+async function parseMySpikeCP(cpUrl) {
+  const html = await httpGetHtml(cpUrl);
+  const $ = cheerio.load(html);
+
+  const title =
+    $("h1").first().text().trim() ||
+    $("title").text().trim() ||
+    `CP ${extractCpId(cpUrl) || ""}`.trim();
+
+  const links = new Set();
+
+  $("a").each((_, a) => {
+    const href = $(a).attr("href");
+    if (!href) return;
+
+    let full = href;
+
+    // Absolute-kan link
+    if (href.startsWith("/")) full = "https://www.myspike.my" + href;
+    if (href.startsWith("index.php")) full = "https://www.myspike.my/" + href;
+
+    // Kekalkan juga kalau href relative tanpa domain tapi ada "r=umum-noss%2Fview"
+    if (
+      /r=umum-noss%2Fview&id=\d+/i.test(full) ||
+      /r=umum-noss\/view&id=\d+/i.test(full)
+    ) {
+      links.add(full);
+    }
+  });
 
   return {
-    url,
-    cpId: extractCpId(url),
-    title: pageTitle,
-    wa: dedup,
+    cpUrl,
+    cpId: extractCpId(cpUrl),
+    title,
+    jdLinks: Array.from(links),
+  };
+}
+
+/**
+ * Helper: CP->JD->WA (result untuk 1 CP)
+ */
+async function buildCPResult(cpUrl) {
+  const cp = await parseMySpikeCP(cpUrl);
+
+  const jdItems = [];
+  for (const jdUrl of cp.jdLinks) {
+    const jd = await parseMySpikeJDForWA(jdUrl);
+    jdItems.push(jd);
+  }
+
+  // Gabung WA dari semua JD
+  const allWA = [];
+  for (const j of jdItems) for (const w of j.wa || []) allWA.push(w);
+
+  // Dedupe gabungan
+  const seen = new Set();
+  const mergedWA = allWA.filter((x) => {
+    const k = normalizeText(x);
+    if (!k || seen.has(k)) return false;
+    seen.add(k);
+    return true;
+  });
+
+  return {
+    cpUrl: cp.cpUrl,
+    cpId: cp.cpId,
+    title: cp.title,
+    jdCount: cp.jdLinks.length,
+    wa: mergedWA,
+    jd: jdItems.map((j) => ({
+      jdUrl: j.jdUrl,
+      jdId: j.jdId,
+      title: j.title,
+      waCount: (j.wa || []).length,
+      wa: j.wa || [],
+    })),
   };
 }
 
 /**
  * POST /api/myspike/parse-wa
  * Body: { sessionId?: "dacum-demo", urls?: [..] }
+ * Return: items[] setiap CP ada wa gabungan + pecahan ikut JD
  */
 app.post("/api/myspike/parse-wa", async (req, res) => {
   try {
@@ -271,8 +349,10 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
         ? req.body.urls
         : DEFAULT_MYSPIKE_URLS;
 
-    // cache 15 min
-    const cached = myspikeCache.get(sessionId);
+    // cache 15 min (ikut sessionId + url list signature ringkas)
+    const cacheKey = `${sessionId}::${urls.join("|")}`;
+    const cached = myspikeCache.get(cacheKey);
+
     if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
       return res.json({
         sessionId,
@@ -283,12 +363,11 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
     }
 
     const results = [];
-    for (const url of urls) {
-      const item = await parseMySpikeWA(url);
-      results.push(item);
+    for (const cpUrl of urls) {
+      results.push(await buildCPResult(cpUrl));
     }
 
-    myspikeCache.set(sessionId, { fetchedAt: Date.now(), data: results });
+    myspikeCache.set(cacheKey, { fetchedAt: Date.now(), data: results });
 
     return res.json({
       sessionId,
@@ -308,7 +387,12 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
 /**
  * POST /api/myspike/compare
  * Body:
- * { sessionId?: "dacum-demo", urls?: [...], dacumWA: [...], threshold?: 0.45 }
+ * {
+ *   sessionId?: "dacum-demo",
+ *   urls?: [...],
+ *   dacumWA: ["...", "..."],   // WA dari DACUM (sementara: hantar dari frontend)
+ *   threshold?: 0.45
+ * }
  */
 app.post("/api/myspike/compare", async (req, res) => {
   try {
@@ -329,22 +413,24 @@ app.post("/api/myspike/compare", async (req, res) => {
       });
     }
 
-    // Parse MySPIKE (guna cache jika ada)
-    let parsed;
-    const cached = myspikeCache.get(sessionId);
+    // Build parsed MySPIKE from CP->JD->WA (guna cache parse-wa cacheKey)
+    const cacheKey = `${sessionId}::${urls.join("|")}`;
+    let items;
+
+    const cached = myspikeCache.get(cacheKey);
     if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
-      parsed = cached.data;
+      items = cached.data;
     } else {
-      parsed = [];
-      for (const url of urls) parsed.push(await parseMySpikeWA(url));
-      myspikeCache.set(sessionId, { fetchedAt: Date.now(), data: parsed });
+      items = [];
+      for (const cpUrl of urls) {
+        items.push(await buildCPResult(cpUrl));
+      }
+      myspikeCache.set(cacheKey, { fetchedAt: Date.now(), data: items });
     }
 
     // Flatten all MySPIKE WA
     const myspikeWA = [];
-    for (const item of parsed) {
-      for (const w of item.wa) myspikeWA.push(w);
-    }
+    for (const item of items) for (const w of item.wa || []) myspikeWA.push(w);
 
     // Dedupe lists
     const dedupeList = (arr) => {
@@ -354,7 +440,7 @@ app.post("/api/myspike/compare", async (req, res) => {
         const n = normalizeText(x);
         if (!n || seen.has(n)) continue;
         seen.add(n);
-        out.push(x.trim());
+        out.push(String(x).trim());
       }
       return out;
     };
@@ -372,6 +458,7 @@ app.post("/api/myspike/compare", async (req, res) => {
         const s = jaccardSimilarity(mw, dw);
         if (s > best.score) best = { score: s, dw };
       }
+
       if (best.score >= threshold) {
         matches.push({
           myspikeWA: mw,
@@ -398,19 +485,21 @@ app.post("/api/myspike/compare", async (req, res) => {
     return res.json({
       sessionId,
       threshold,
-      myspike: { total: myspikeList.length, list: myspikeList },
+      myspike: {
+        total: myspikeList.length,
+        list: myspikeList,
+        itemsSummary: items.map((x) => ({
+          cpId: x.cpId,
+          title: x.title,
+          jdCount: x.jdCount,
+          waCount: (x.wa || []).length,
+        })),
+      },
       dacum: { total: dacumList.length, list: dacumList },
       matches,
       missingInDacum,
       extraInDacum,
-      source: {
-        urls,
-        parsedSummary: parsed.map((p) => ({
-          cpId: p.cpId,
-          title: p.title,
-          waCount: p.wa.length,
-        })),
-      },
+      source: { urls },
     });
   } catch (err) {
     console.error("compare error:", err?.message || err);
@@ -427,12 +516,7 @@ app.post("/api/myspike/compare", async (req, res) => {
  * =========================
  */
 io.on("connection", (socket) => {
-  // Optional: boleh log untuk debug
-  // console.log("Socket connected:", socket.id);
-
-  socket.on("disconnect", () => {
-    // console.log("Socket disconnected:", socket.id);
-  });
+  socket.on("disconnect", () => {});
 });
 
 // Port
