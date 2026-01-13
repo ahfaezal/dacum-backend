@@ -52,8 +52,8 @@ app.post("/cards/:session", (req, res) => {
 
   const card = {
     id: Date.now(),
-    name,
-    activity,
+    name: String(name).trim(),
+    activity: String(activity).trim(),
     time: new Date().toISOString()
   };
 
@@ -84,8 +84,8 @@ app.post("/submit", (req, res) => {
 
   const card = {
     id: Date.now(),
-    name,
-    activity,
+    name: String(name).trim(),
+    activity: String(activity).trim(),
     time: new Date().toISOString()
   };
 
@@ -93,6 +93,61 @@ app.post("/submit", (req, res) => {
   io.to(session).emit("new-card", card);
 
   res.json({ success: true, card });
+});
+
+/**
+ * ====== FASA 2: CLUSTER DACUM TASKS (MVP v1) ======
+ * Endpoint:
+ *   POST /cluster/:session
+ *
+ * Output:
+ *   {
+ *     session: "dacum-demo",
+ *     clusters: [
+ *       { title: "...", tasks: ["...", "..."] }
+ *     ]
+ *   }
+ *
+ * Nota:
+ * - Ini clustering ringkas (rule-based) untuk mula susun aktiviti.
+ * - Lepas ini kita boleh upgrade kepada AI clustering.
+ */
+app.post("/cluster/:session", (req, res) => {
+  const session = req.params.session;
+  const cards = sessions[session] || [];
+
+  if (!cards.length) {
+    return res.status(400).json({ success: false, error: "No cards to cluster" });
+  }
+
+  // Grouping rule-based (boleh tambah rules ikut bidang)
+  const groups = {};
+
+  for (const c of cards) {
+    const text = (c.activity || "").toLowerCase();
+
+    let key = "Lain-lain";
+
+    // Rules contoh (boleh ubah ikut NOSS Pengurusan Masjid)
+    if (text.includes("jadual") || text.includes("schedule")) key = "Pengurusan Jadual";
+    else if (text.includes("imam")) key = "Pengurusan Imam";
+    else if (text.includes("bilal")) key = "Pengurusan Bilal";
+    else if (text.includes("kariah") || text.includes("jemaah")) key = "Pengurusan Kariah/Jemaah";
+    else if (text.includes("kewangan") || text.includes("akaun") || text.includes("bayaran")) key = "Pengurusan Kewangan";
+    else if (text.includes("program") || text.includes("aktiviti") || text.includes("majlis")) key = "Pengurusan Program";
+    else if (text.includes("aset") || text.includes("inventori") || text.includes("peralatan")) key = "Pengurusan Aset/Inventori";
+    else if (text.includes("penyelenggaraan") || text.includes("maintenance")) key = "Penyelenggaraan";
+
+    if (!groups[key]) groups[key] = [];
+    groups[key].push(c.activity);
+  }
+
+  const clusters = Object.keys(groups).map((title) => ({
+    title,
+    tasks: groups[title]
+  }));
+
+  return res.json({ success: true, session, totalCards: cards.length, clusters });
 });
 
 // Socket events
