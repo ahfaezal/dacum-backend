@@ -124,13 +124,10 @@ app.patch("/cards/:session/:id", (req, res) => {
 });
 
 /**
- * =========================
- * Socket.IO basic events
- * =========================
+ * ======================================================
+ * LALUAN B: MySPIKE Comparator (Parse WA + Compare)
+ * ======================================================
  */
-// ===== Laluan B: MySPIKE Comparator =====
-const axios = require("axios");
-const cheerio = require("cheerio");
 
 // 5 URL default (boleh override dari request)
 const DEFAULT_MYSPIKE_URLS = [
@@ -141,7 +138,7 @@ const DEFAULT_MYSPIKE_URLS = [
   "https://www.myspike.my/index.php?r=umum-noss%2Findex-cp&id=8676",
 ];
 
-// Simpan cache ringkas ikut session (in-memory)
+// Cache ringkas ikut session (in-memory)
 const myspikeCache = new Map(); // key: sessionId, value: { fetchedAt, data }
 
 // --- util text ---
@@ -180,13 +177,11 @@ function extractCpId(url) {
 
 /**
  * Parse MySPIKE CP page -> extract WA list (best-effort).
- * MySPIKE markup boleh berubah; jadi kita buat extraction yang robust.
  */
 async function parseMySpikeWA(url) {
   const resp = await axios.get(url, {
     timeout: 20000,
     headers: {
-      // elak 403/anti-bot basic
       "User-Agent":
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari",
       Accept: "text/html,application/xhtml+xml",
@@ -196,7 +191,6 @@ async function parseMySpikeWA(url) {
   const html = resp.data;
   const $ = cheerio.load(html);
 
-  // Ambil title/page heading (untuk rujukan)
   const pageTitle =
     $("h1").first().text().trim() ||
     $("title").text().trim() ||
@@ -204,23 +198,14 @@ async function parseMySpikeWA(url) {
 
   let candidates = [];
 
-  /**
-   * STRATEGI EXTRACTION (best-effort):
-   * 1) Cari elemen table yang ada baris bertajuk Work Activity / Aktiviti Kerja / WA
-   * 2) Kalau tak jumpa, fallback: semua <li> yang nampak macam ayat aktiviti kerja
-   * 3) Kalau masih tak, ambil text block dan extract line yang panjangnya munasabah
-   */
-
-  // 1) Cari semua row table dan ambil cell yang “nampak macam WA”
+  // 1) Cari dalam table row yang ada petunjuk WA
   $("table tr").each((_, tr) => {
     const cells = $(tr).find("td,th");
     const texts = [];
     cells.each((__, c) => texts.push($(c).text().replace(/\s+/g, " ").trim()));
     const rowText = texts.join(" | ");
 
-    // heuristik: baris yang mengandungi "Work Activity" / "Aktiviti Kerja" / "WA"
     if (/(work\s*activity|aktiviti\s*kerja|\bwa\b)/i.test(rowText)) {
-      // cuba ambil cell terakhir sebagai isi
       const last = texts[texts.length - 1] || "";
       if (last && last.length > 4) candidates.push(last);
     }
@@ -230,14 +215,17 @@ async function parseMySpikeWA(url) {
   if (candidates.length < 3) {
     $("li").each((_, li) => {
       const t = $(li).text().replace(/\s+/g, " ").trim();
-      // heuristik: ayat WA biasanya agak panjang dan bukan menu
-      if (t.length >= 12 && t.length <= 180 && !/cookie|privacy|copyright/i.test(t)) {
+      if (
+        t.length >= 12 &&
+        t.length <= 180 &&
+        !/cookie|privacy|copyright/i.test(t)
+      ) {
         candidates.push(t);
       }
     });
   }
 
-  // 3) Fallback: text blocks
+  // 3) Fallback: text lines
   if (candidates.length < 3) {
     const bodyText = $("body").text().replace(/\r/g, "\n");
     const lines = bodyText
@@ -257,7 +245,6 @@ async function parseMySpikeWA(url) {
   const seen = new Set();
   for (const c of candidates) {
     const n = normalizeText(c);
-    // buang label yang terlalu umum
     if (!n || n === "work activity" || n === "aktiviti kerja") continue;
     if (seen.has(n)) continue;
     seen.add(n);
@@ -275,17 +262,24 @@ async function parseMySpikeWA(url) {
 /**
  * POST /api/myspike/parse-wa
  * Body: { sessionId?: "dacum-demo", urls?: [..] }
- * Return: { sessionId, fetchedAt, items:[{url,cpId,title,wa:[]}, ...] }
  */
 app.post("/api/myspike/parse-wa", async (req, res) => {
   try {
     const sessionId = req.body?.sessionId || "dacum-demo";
-    const urls = Array.isArray(req.body?.urls) && req.body.urls.length ? req.body.urls : DEFAULT_MYSPIKE_URLS;
+    const urls =
+      Array.isArray(req.body?.urls) && req.body.urls.length
+        ? req.body.urls
+        : DEFAULT_MYSPIKE_URLS;
 
-    // cache 15 min untuk elak hit MySPIKE banyak kali
+    // cache 15 min
     const cached = myspikeCache.get(sessionId);
     if (cached && Date.now() - cached.fetchedAt < 15 * 60 * 1000) {
-      return res.json({ sessionId, fetchedAt: cached.fetchedAt, cached: true, items: cached.data });
+      return res.json({
+        sessionId,
+        fetchedAt: cached.fetchedAt,
+        cached: true,
+        items: cached.data,
+      });
     }
 
     const results = [];
@@ -295,41 +289,44 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
     }
 
     myspikeCache.set(sessionId, { fetchedAt: Date.now(), data: results });
-    return res.json({ sessionId, fetchedAt: Date.now(), cached: false, items: results });
+
+    return res.json({
+      sessionId,
+      fetchedAt: Date.now(),
+      cached: false,
+      items: results,
+    });
   } catch (err) {
     console.error("parse-wa error:", err?.message || err);
-    return res.status(500).json({ error: "Failed to parse MySPIKE WA", detail: String(err?.message || err) });
+    return res.status(500).json({
+      error: "Failed to parse MySPIKE WA",
+      detail: String(err?.message || err),
+    });
   }
 });
 
 /**
  * POST /api/myspike/compare
  * Body:
- * {
- *   sessionId?: "dacum-demo",
- *   urls?: [...],
- *   dacumWA: ["...", "..."],   // WA dari DACUM (hantar dari frontend buat sementara)
- *   threshold?: 0.45           // similarity threshold
- * }
- *
- * Return:
- * {
- *  myspike: { total, list:[...] },
- *  dacum: { total, list:[...] },
- *  matches: [{ myspikeWA, bestDacumWA, score }],
- *  missingInDacum: [...],   // WA MySPIKE yang tak jumpa match
- *  extraInDacum: [...]      // WA DACUM yang tak ada di MySPIKE (indikasi)
- * }
+ * { sessionId?: "dacum-demo", urls?: [...], dacumWA: [...], threshold?: 0.45 }
  */
 app.post("/api/myspike/compare", async (req, res) => {
   try {
     const sessionId = req.body?.sessionId || "dacum-demo";
-    const urls = Array.isArray(req.body?.urls) && req.body.urls.length ? req.body.urls : DEFAULT_MYSPIKE_URLS;
+    const urls =
+      Array.isArray(req.body?.urls) && req.body.urls.length
+        ? req.body.urls
+        : DEFAULT_MYSPIKE_URLS;
+
     const dacumWA = Array.isArray(req.body?.dacumWA) ? req.body.dacumWA : [];
-    const threshold = typeof req.body?.threshold === "number" ? req.body.threshold : 0.45;
+    const threshold =
+      typeof req.body?.threshold === "number" ? req.body.threshold : 0.45;
 
     if (!dacumWA.length) {
-      return res.status(400).json({ error: "dacumWA is required (array). Buat sementara, hantar dari frontend dahulu." });
+      return res.status(400).json({
+        error:
+          "dacumWA is required (array). Buat sementara, hantar dari frontend dahulu.",
+      });
     }
 
     // Parse MySPIKE (guna cache jika ada)
@@ -376,15 +373,27 @@ app.post("/api/myspike/compare", async (req, res) => {
         if (s > best.score) best = { score: s, dw };
       }
       if (best.score >= threshold) {
-        matches.push({ myspikeWA: mw, bestDacumWA: best.dw, score: Number(best.score.toFixed(3)) });
+        matches.push({
+          myspikeWA: mw,
+          bestDacumWA: best.dw,
+          score: Number(best.score.toFixed(3)),
+        });
       } else {
-        missingInDacum.push({ myspikeWA: mw, bestDacumWA: best.dw, score: Number(best.score.toFixed(3)) });
+        missingInDacum.push({
+          myspikeWA: mw,
+          bestDacumWA: best.dw,
+          score: Number(best.score.toFixed(3)),
+        });
       }
     }
 
     // Extra in DACUM: yang tak matched oleh mana-mana MySPIKE
-    const matchedDacumNorm = new Set(matches.map((m) => normalizeText(m.bestDacumWA)));
-    const extraInDacum = dacumList.filter((dw) => !matchedDacumNorm.has(normalizeText(dw)));
+    const matchedDacumNorm = new Set(
+      matches.map((m) => normalizeText(m.bestDacumWA))
+    );
+    const extraInDacum = dacumList.filter(
+      (dw) => !matchedDacumNorm.has(normalizeText(dw))
+    );
 
     return res.json({
       sessionId,
@@ -394,14 +403,29 @@ app.post("/api/myspike/compare", async (req, res) => {
       matches,
       missingInDacum,
       extraInDacum,
-      source: { urls, parsedSummary: parsed.map((p) => ({ cpId: p.cpId, title: p.title, waCount: p.wa.length })) },
+      source: {
+        urls,
+        parsedSummary: parsed.map((p) => ({
+          cpId: p.cpId,
+          title: p.title,
+          waCount: p.wa.length,
+        })),
+      },
     });
   } catch (err) {
     console.error("compare error:", err?.message || err);
-    return res.status(500).json({ error: "Failed to compare MySPIKE vs DACUM", detail: String(err?.message || err) });
+    return res.status(500).json({
+      error: "Failed to compare MySPIKE vs DACUM",
+      detail: String(err?.message || err),
+    });
   }
 });
 
+/**
+ * =========================
+ * Socket.IO basic events
+ * =========================
+ */
 io.on("connection", (socket) => {
   // Optional: boleh log untuk debug
   // console.log("Socket connected:", socket.id);
