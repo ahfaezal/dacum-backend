@@ -402,16 +402,29 @@ app.post("/api/myspike/compare", async (req, res) => {
         ? req.body.urls
         : DEFAULT_MYSPIKE_URLS;
 
-    const dacumWA = Array.isArray(req.body?.dacumWA) ? req.body.dacumWA : [];
-    const threshold =
-      typeof req.body?.threshold === "number" ? req.body.threshold : 0.45;
+// Auto ambil DACUM WA dari session (cards yang dah dilabel wa)
+const sessionCards = sessions[sessionId] || [];
+const dacumWA = sessionCards
+  .map((c) => (c && c.wa ? String(c.wa).trim() : ""))
+  .filter(Boolean);
 
-    if (!dacumWA.length) {
-      return res.status(400).json({
-        error:
-          "dacumWA is required (array). Buat sementara, hantar dari frontend dahulu.",
-      });
-    }
+// fallback optional: kalau user masih hantar dacumWA dari luar, kita gabungkan
+const dacumWAFromBody = Array.isArray(req.body?.dacumWA) ? req.body.dacumWA : [];
+for (const x of dacumWAFromBody) {
+  const t = String(x || "").trim();
+  if (t) dacumWA.push(t);
+}
+
+if (!dacumWA.length) {
+  return res.status(400).json({
+    error:
+      "Tiada DACUM WA dalam session ini. Pastikan kad DACUM telah dilabel (PATCH /cards/:session/:id dengan field wa).",
+    hint: {
+      sessionId,
+      totalCardsInSession: sessionCards.length,
+    },
+  });
+}
 
     // Build parsed MySPIKE from CP->JD->WA (guna cache parse-wa cacheKey)
     const cacheKey = `${sessionId}::${urls.join("|")}`;
