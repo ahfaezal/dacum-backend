@@ -714,9 +714,3 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log("DACUM Backend running on port", PORT);
 });
-
-// Port
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log("DACUM Backend running on port", PORT);
-});
