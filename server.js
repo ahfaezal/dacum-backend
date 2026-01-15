@@ -4,8 +4,12 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
+const OpenAI = require("openai");
 
 const app = express();
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
 // CORS + JSON body
 app.use(cors({ origin: "*" }));
