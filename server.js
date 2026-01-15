@@ -685,6 +685,36 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
   }
 });
 
+/* ================================
+ * DEBUG OPENAI CONNECTION
+ * ================================ */
+app.get("/debug/openai", async (req, res) => {
+  try {
+    const r = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: ["test connection"]
+    });
+    res.json({
+      ok: true,
+      embedding_dim: r.data?.[0]?.embedding?.length
+    });
+  } catch (e) {
+    console.error("OPENAI DEBUG ERROR:", e);
+    res.status(500).json({
+      ok: false,
+      message: e?.message || "unknown error",
+      status: e?.status || null,
+      code: e?.code || null
+    });
+  }
+});
+
+// Port
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log("DACUM Backend running on port", PORT);
+});
+
 // Port
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
