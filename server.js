@@ -1,21 +1,58 @@
+/**
+ * server.js — Kemaskini penuh (boleh terus copy/paste)
+ * - Fix app missing
+ * - Fix OpenAI SDK mismatch (gunakan v4)
+ * - Fix threshold undefined
+ * - Fix debug endpoint
+ * - Improve Socket.IO by session rooms
+ * - Slight robustness improvements
+ */
+
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
-const OpenAI = require("openai").default;
 
+// ✅ OpenAI SDK v4
+const OpenAI = require("openai");
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+
+/* =========================
+ * App + Server
+ * ========================= */
 const app = express();
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
+
+// CORS + JSON body
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "2mb" })); // limit kecil untuk safety
+
+// Create HTTP server + Socket.IO
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: { origin: "*" },
 });
+
+/* =========================
+ * In-memory storage (MVP)
+ * ========================= */
+const sessions = {}; // { [sessionId]: Array<Card> }
+
+/* =========================
+ * Utils (cluster)
+ * ========================= */
 function cosineSim(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
+  let dot = 0,
+    na = 0,
+    nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    const ai = a[i] || 0;
+    const bi = b[i] || 0;
+    dot += ai * bi;
+    na += ai * ai;
+    nb += bi * bi;
   }
   const denom = Math.sqrt(na) * Math.sqrt(nb);
   return denom ? dot / denom : 0;
@@ -61,10 +98,48 @@ function buildGraphClusters(vectors, threshold = 0.82) {
 
 function keywordTitle(texts, topK = 3) {
   const stop = new Set([
-    "dan","yang","untuk","dengan","pada","kepada","dalam","di","ke","dari","atau","oleh",
-    "ini","itu","sahaja","juga","agar","supaya","bagi","serta","adalah","akan","telah",
-    "semasa","ketika","bila","apabila","cara","buat","membuat","mengurus","urus","pimpin",
-    "sebagai","satu","dua","tiga","empat","lima","program","aktiviti","kerja"
+    "dan",
+    "yang",
+    "untuk",
+    "dengan",
+    "pada",
+    "kepada",
+    "dalam",
+    "di",
+    "ke",
+    "dari",
+    "atau",
+    "oleh",
+    "ini",
+    "itu",
+    "sahaja",
+    "juga",
+    "agar",
+    "supaya",
+    "bagi",
+    "serta",
+    "adalah",
+    "akan",
+    "telah",
+    "semasa",
+    "ketika",
+    "bila",
+    "apabila",
+    "cara",
+    "buat",
+    "membuat",
+    "mengurus",
+    "urus",
+    "pimpin",
+    "sebagai",
+    "satu",
+    "dua",
+    "tiga",
+    "empat",
+    "lima",
+    "program",
+    "aktiviti",
+    "kerja",
   ]);
 
   const freq = new Map();
@@ -74,30 +149,21 @@ function keywordTitle(texts, topK = 3) {
       .replace(/[^a-z0-9\u00C0-\u024F\u1E00-\u1EFF\s]/g, " ")
       .split(/\s+/)
       .filter(Boolean)
-      .filter(w => w.length >= 3)
-      .filter(w => !stop.has(w));
+      .filter((w) => w.length >= 3)
+      .filter((w) => !stop.has(w));
     for (const w of toks) freq.set(w, (freq.get(w) || 0) + 1);
   }
 
-  const top = [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0, topK).map(([w])=>w);
+  const top = [...freq.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, topK)
+    .map(([w]) => w);
   return top.length ? top.join(" / ") : "CU";
 }
 
-
-// CORS + JSON body
-app.use(cors({ origin: "*" }));
-app.use(express.json());
-
-// Create HTTP server + Socket.IO
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
-
-// In-memory storage (MVP)
-const sessions = {}; // { [sessionId]: Array<Card> }
-
-// Root route for quick test
+/* =========================
+ * Root route
+ * ========================= */
 app.get("/", (req, res) => {
   res.send("DACUM Backend OK");
 });
@@ -147,8 +213,8 @@ app.post("/cards/:session", (req, res) => {
 
   sessions[session].push(card);
 
-  // Live update to clients watching this session (optional)
-  io.emit("card:new", { session, card });
+  // Live update to clients watching this session (room-based)
+  io.to(session).emit("card:new", { session, card });
 
   return res.json({ success: true, card });
 });
@@ -189,8 +255,8 @@ app.patch("/cards/:session/:id", (req, res) => {
 
     arr[idx] = updated;
 
-    // Live update
-    io.emit("card:update", { session, card: updated });
+    // Live update to clients in that session room
+    io.to(session).emit("card:update", { session, card: updated });
 
     return res.json({ success: true, card: updated });
   } catch (e) {
@@ -200,11 +266,38 @@ app.patch("/cards/:session/:id", (req, res) => {
   }
 });
 
+/* =========================
+ * Socket.IO rooms helper
+ * =========================
+ * Frontend boleh buat:
+ *   const socket = io(API_BASE);
+ *   socket.emit("session:join", { sessionId });
+ *
+ * Atau guna endpoint POST /socket/join (optional) untuk debug.
+ */
+io.on("connection", (socket) => {
+  socket.on("session:join", (payload) => {
+    try {
+      const sessionId = String(payload?.sessionId || "").trim();
+      if (!sessionId) return;
+      socket.join(sessionId);
+      socket.emit("session:joined", { sessionId });
+    } catch {}
+  });
+
+  socket.on("disconnect", () => {});
+});
+
+// Optional debug join via HTTP
+app.post("/socket/join", (req, res) => {
+  // Ini hanya placeholder untuk debug; join sebenar perlu dibuat dari client socket.
+  res.json({ ok: true, note: "Join room perlu dibuat dari Socket.IO client." });
+});
+
 /**
  * ======================================================
  * LALUAN B: MySPIKE Comparator (CP -> JD -> WA)
  * WA di MySPIKE: "Objektif Pembelajaran" (senarai 1..n)
- * WS/PC tidak dipaparkan dalam MySPIKE untuk kes ini.
  * ======================================================
  */
 
@@ -218,7 +311,7 @@ const DEFAULT_MYSPIKE_URLS = [
 ];
 
 // Cache ringkas ikut session (in-memory)
-const myspikeCache = new Map(); // key: sessionId, value: { fetchedAt, data }
+const myspikeCache = new Map(); // key: sessionId::signature, value: { fetchedAt, data }
 
 // --- util text ---
 function normalizeText(s = "") {
@@ -243,8 +336,8 @@ function jaccardSimilarity(a, b) {
   return union === 0 ? 0 : inter / union;
 }
 
-// Try parse CP id from url
-function extractCpId(url) {
+// Extract id param from URL
+function extractAnyId(url) {
   try {
     const u = new URL(url);
     return u.searchParams.get("id");
@@ -254,15 +347,9 @@ function extractCpId(url) {
   }
 }
 
-// Extract "id" param dari URL (untuk JD pun sama)
-function extractAnyId(url) {
-  try {
-    const u = new URL(url);
-    return u.searchParams.get("id");
-  } catch {
-    const m = String(url).match(/id=(\d+)/);
-    return m ? m[1] : null;
-  }
+// Try parse CP id from url
+function extractCpId(url) {
+  return extractAnyId(url);
 }
 
 async function httpGetHtml(url) {
@@ -355,7 +442,6 @@ async function parseMySpikeCP(cpUrl) {
     if (href.startsWith("/")) full = "https://www.myspike.my" + href;
     if (href.startsWith("index.php")) full = "https://www.myspike.my/" + href;
 
-    // Kekalkan juga kalau href relative tanpa domain tapi ada "r=umum-noss%2Fview"
     if (
       /r=umum-noss%2Fview&id=\d+/i.test(full) ||
       /r=umum-noss\/view&id=\d+/i.test(full)
@@ -416,7 +502,6 @@ async function buildCPResult(cpUrl) {
 /**
  * POST /api/myspike/parse-wa
  * Body: { sessionId?: "dacum-demo", urls?: [..] }
- * Return: items[] setiap CP ada wa gabungan + pecahan ikut JD
  */
 app.post("/api/myspike/parse-wa", async (req, res) => {
   try {
@@ -467,7 +552,7 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
  * {
  *   sessionId?: "dacum-demo",
  *   urls?: [...],
- *   dacumWA: ["...", "..."],   // WA dari DACUM (sementara: hantar dari frontend)
+ *   dacumWA?: ["...", "..."],   // optional: gabung dengan session cards
  *   threshold?: 0.45
  * }
  */
@@ -479,31 +564,36 @@ app.post("/api/myspike/compare", async (req, res) => {
         ? req.body.urls
         : DEFAULT_MYSPIKE_URLS;
 
-// Auto ambil DACUM WA dari session (cards yang dah dilabel wa)
-const sessionCards = sessions[sessionId] || [];
-const dacumWA = sessionCards
-  .map((c) => (c && c.wa ? String(c.wa).trim() : ""))
-  .filter(Boolean);
+    // ✅ FIX: threshold mesti wujud
+    const threshold = Number(req.body?.threshold ?? 0.45);
 
-// fallback optional: kalau user masih hantar dacumWA dari luar, kita gabungkan
-const dacumWAFromBody = Array.isArray(req.body?.dacumWA) ? req.body.dacumWA : [];
-for (const x of dacumWAFromBody) {
-  const t = String(x || "").trim();
-  if (t) dacumWA.push(t);
-}
+    // Auto ambil DACUM WA dari session (cards yang dah dilabel wa)
+    const sessionCards = sessions[sessionId] || [];
+    const dacumWA = sessionCards
+      .map((c) => (c && c.wa ? String(c.wa).trim() : ""))
+      .filter(Boolean);
 
-if (!dacumWA.length) {
-  return res.status(400).json({
-    error:
-      "Tiada DACUM WA dalam session ini. Pastikan kad DACUM telah dilabel (PATCH /cards/:session/:id dengan field wa).",
-    hint: {
-      sessionId,
-      totalCardsInSession: sessionCards.length,
-    },
-  });
-}
+    // fallback optional: kalau user masih hantar dacumWA dari luar, kita gabungkan
+    const dacumWAFromBody = Array.isArray(req.body?.dacumWA)
+      ? req.body.dacumWA
+      : [];
+    for (const x of dacumWAFromBody) {
+      const t = String(x || "").trim();
+      if (t) dacumWA.push(t);
+    }
 
-    // Build parsed MySPIKE from CP->JD->WA (guna cache parse-wa cacheKey)
+    if (!dacumWA.length) {
+      return res.status(400).json({
+        error:
+          "Tiada DACUM WA dalam session ini. Pastikan kad DACUM telah dilabel (PATCH /cards/:session/:id dengan field wa).",
+        hint: {
+          sessionId,
+          totalCardsInSession: sessionCards.length,
+        },
+      });
+    }
+
+    // Build parsed MySPIKE from CP->JD->WA (guna cache)
     const cacheKey = `${sessionId}::${urls.join("|")}`;
     let items;
 
@@ -600,15 +690,6 @@ if (!dacumWA.length) {
   }
 });
 
-/**
- * =========================
- * Socket.IO basic events
- * =========================
- */
-io.on("connection", (socket) => {
-  socket.on("disconnect", () => {});
-});
-
 /* ================================
  * AI CLUSTER SUGGESTION ENDPOINT
  * ================================ */
@@ -618,7 +699,9 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
     if (!sid) return res.status(400).json({ error: "sessionId diperlukan" });
 
     if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY belum diset di Render" });
+      return res
+        .status(500)
+        .json({ error: "OPENAI_API_KEY belum diset di Render" });
     }
 
     const {
@@ -627,20 +710,33 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
       maxClusters = 12,
     } = req.body || {};
 
-    // ⚠️ IMPORTANT: guna storage sedia ada anda
-    // Biasanya dalam code anda ada: const sessions = {};
     const items = sessions[sid] || [];
 
     if (!Array.isArray(items) || items.length === 0) {
       return res.json({ sessionId: sid, clusters: [], unassigned: [] });
     }
 
-    // texts untuk embedding
-    const texts = items.map((c) => String(c.activity || "").trim());
-    const idxToCardId = items.map((c) => c.id);
+    // texts untuk embedding (filter yang kosong supaya OpenAI tak meragam)
+    const filtered = [];
+    for (const c of items) {
+      const t = String(c?.activity || "").trim();
+      if (t) filtered.push({ id: c.id, text: t });
+    }
 
-    // Embeddings (OpenAI)
-    const emb = await openai.embeddings.create({
+    if (filtered.length === 0) {
+      return res.json({
+        sessionId: sid,
+        clusters: [],
+        unassigned: items.map((x) => x.id),
+        note: "Semua activity kosong, tiada input untuk embedding.",
+      });
+    }
+
+    const texts = filtered.map((x) => x.text);
+    const idxToCardId = filtered.map((x) => x.id);
+
+    // Embeddings (OpenAI v4)
+    const emb = await client.embeddings.create({
       model: "text-embedding-3-small",
       input: texts,
     });
@@ -667,7 +763,7 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
       const clusterTexts = idxs.map((i) => texts[i]);
       return {
         clusterId: `c${k + 1}`,
-        title: keywordTitle(clusterTexts, 3), // tajuk sementara (lepas ini kita buat LLM naming)
+        title: keywordTitle(clusterTexts, 3),
         cardIds: idxs.map((i) => idxToCardId[i]),
       };
     });
@@ -681,35 +777,46 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
     });
   } catch (e) {
     console.error(e);
-    return res.status(500).json({ error: e?.message || "AI clustering error" });
+    return res
+      .status(500)
+      .json({ error: e?.message || "AI clustering error" });
   }
 });
 
 /* ================================
- * DEBUG OPENAI CONNECTION
+ * DEBUG OPENAI CONNECTION (v4)
  * ================================ */
 app.get("/debug/openai", async (req, res) => {
   try {
-    const r = await openai.createEmbedding({
-      model: "text-embedding-ada-002",
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({
+        ok: false,
+        message: "OPENAI_API_KEY belum diset",
+      });
+    }
+
+    const r = await client.embeddings.create({
+      model: "text-embedding-3-small",
       input: "test connection",
     });
 
     res.json({
       ok: true,
-      embedding_dim: r.data.data[0].embedding.length,
+      embedding_dim: r.data[0].embedding.length,
     });
   } catch (e) {
-    console.error("OPENAI DEBUG ERROR:", e.response?.data || e.message);
+    console.error("OPENAI DEBUG ERROR:", e?.message);
     res.status(500).json({
       ok: false,
-      message: e.message,
-      detail: e.response?.data || null,
+      message: e?.message,
+      detail: e?.response?.data || null,
     });
   }
 });
 
-// Port
+/* =========================
+ * Port
+ * ========================= */
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log("DACUM Backend running on port", PORT);
