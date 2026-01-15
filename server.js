@@ -4,7 +4,7 @@ const { Server } = require("socket.io");
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
-const OpenAI = require("openai");
+const OpenAI = require("openai").default;
 
 const app = express();
 const openai = new OpenAI({
