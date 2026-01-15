@@ -10,6 +10,79 @@ const app = express();
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
+function cosineSim(a, b) {
+  let dot = 0, na = 0, nb = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  const denom = Math.sqrt(na) * Math.sqrt(nb);
+  return denom ? dot / denom : 0;
+}
+
+function buildGraphClusters(vectors, threshold = 0.82) {
+  const n = vectors.length;
+  const adj = Array.from({ length: n }, () => []);
+
+  // graph edges by cosine threshold
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      const s = cosineSim(vectors[i], vectors[j]);
+      if (s >= threshold) {
+        adj[i].push(j);
+        adj[j].push(i);
+      }
+    }
+  }
+
+  // connected components
+  const seen = new Array(n).fill(false);
+  const comps = [];
+  for (let i = 0; i < n; i++) {
+    if (seen[i]) continue;
+    const stack = [i];
+    seen[i] = true;
+    const comp = [];
+    while (stack.length) {
+      const u = stack.pop();
+      comp.push(u);
+      for (const v of adj[u]) {
+        if (!seen[v]) {
+          seen[v] = true;
+          stack.push(v);
+        }
+      }
+    }
+    comps.push(comp);
+  }
+  return comps;
+}
+
+function keywordTitle(texts, topK = 3) {
+  const stop = new Set([
+    "dan","yang","untuk","dengan","pada","kepada","dalam","di","ke","dari","atau","oleh",
+    "ini","itu","sahaja","juga","agar","supaya","bagi","serta","adalah","akan","telah",
+    "semasa","ketika","bila","apabila","cara","buat","membuat","mengurus","urus","pimpin",
+    "sebagai","satu","dua","tiga","empat","lima","program","aktiviti","kerja"
+  ]);
+
+  const freq = new Map();
+  for (const t of texts) {
+    const toks = String(t || "")
+      .toLowerCase()
+      .replace(/[^a-z0-9\u00C0-\u024F\u1E00-\u1EFF\s]/g, " ")
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter(w => w.length >= 3)
+      .filter(w => !stop.has(w));
+    for (const w of toks) freq.set(w, (freq.get(w) || 0) + 1);
+  }
+
+  const top = [...freq.entries()].sort((a,b)=>b[1]-a[1]).slice(0, topK).map(([w])=>w);
+  return top.length ? top.join(" / ") : "CU";
+}
+
 
 // CORS + JSON body
 app.use(cors({ origin: "*" }));
@@ -534,6 +607,82 @@ if (!dacumWA.length) {
  */
 io.on("connection", (socket) => {
   socket.on("disconnect", () => {});
+});
+
+/* ================================
+ * AI CLUSTER SUGGESTION ENDPOINT
+ * ================================ */
+app.post("/cluster/suggest/:sessionId", async (req, res) => {
+  try {
+    const sid = String(req.params.sessionId || "").trim();
+    if (!sid) return res.status(400).json({ error: "sessionId diperlukan" });
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: "OPENAI_API_KEY belum diset di Render" });
+    }
+
+    const {
+      similarityThreshold = 0.82,
+      minClusterSize = 3,
+      maxClusters = 12,
+    } = req.body || {};
+
+    // ⚠️ IMPORTANT: guna storage sedia ada anda
+    // Biasanya dalam code anda ada: const sessions = {};
+    const items = sessions[sid] || [];
+
+    if (!Array.isArray(items) || items.length === 0) {
+      return res.json({ sessionId: sid, clusters: [], unassigned: [] });
+    }
+
+    // texts untuk embedding
+    const texts = items.map((c) => String(c.activity || "").trim());
+    const idxToCardId = items.map((c) => c.id);
+
+    // Embeddings (OpenAI)
+    const emb = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: texts,
+    });
+
+    const vectors = emb.data.map((d) => d.embedding);
+
+    // cluster by similarity graph
+    const comps = buildGraphClusters(vectors, Number(similarityThreshold));
+
+    // pilih cluster yang cukup besar
+    const valid = comps
+      .filter((c) => c.length >= Number(minClusterSize))
+      .sort((a, b) => b.length - a.length)
+      .slice(0, Number(maxClusters));
+
+    const clustered = new Set(valid.flat());
+    const unassigned = [];
+    for (let i = 0; i < idxToCardId.length; i++) {
+      if (!clustered.has(i)) unassigned.push(idxToCardId[i]);
+    }
+
+    // create cluster result + tajuk sementara
+    const clusters = valid.map((idxs, k) => {
+      const clusterTexts = idxs.map((i) => texts[i]);
+      return {
+        clusterId: `c${k + 1}`,
+        title: keywordTitle(clusterTexts, 3), // tajuk sementara (lepas ini kita buat LLM naming)
+        cardIds: idxs.map((i) => idxToCardId[i]),
+      };
+    });
+
+    return res.json({
+      sessionId: sid,
+      generatedAt: new Date().toISOString(),
+      params: { similarityThreshold, minClusterSize, maxClusters },
+      clusters,
+      unassigned,
+    });
+  } catch (e) {
+    console.error(e);
+    return res.status(500).json({ error: e?.message || "AI clustering error" });
+  }
 });
 
 // Port
