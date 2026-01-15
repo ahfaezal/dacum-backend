@@ -690,21 +690,21 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
  * ================================ */
 app.get("/debug/openai", async (req, res) => {
   try {
-    const r = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: ["test connection"]
+    const r = await openai.createEmbedding({
+      model: "text-embedding-ada-002",
+      input: "test connection",
     });
+
     res.json({
       ok: true,
-      embedding_dim: r.data?.[0]?.embedding?.length
+      embedding_dim: r.data.data[0].embedding.length,
     });
   } catch (e) {
-    console.error("OPENAI DEBUG ERROR:", e);
+    console.error("OPENAI DEBUG ERROR:", e.response?.data || e.message);
     res.status(500).json({
       ok: false,
-      message: e?.message || "unknown error",
-      status: e?.status || null,
-      code: e?.code || null
+      message: e.message,
+      detail: e.response?.data || null,
     });
   }
 });
