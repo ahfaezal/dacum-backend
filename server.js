@@ -39,6 +39,68 @@ const io = new Server(server, {
  * ========================= */
 const sessions = {}; // { [sessionId]: Array<Card> }
 
+// =====================================
+// FASA 2 (DUMMY): AI Cluster Preview
+// =====================================
+app.post("/api/cluster/preview", (req, res) => {
+  const { sessionId, cards } = req.body || {};
+
+  const items =
+    Array.isArray(cards) && cards.length
+      ? cards
+      : [
+          { id: 1, name: "Laungkan azan waktu Subuh" },
+          { id: 2, name: "Simpan resit kewangan rasmi" },
+          { id: 3, name: "Urus mesyuarat jawatankuasa masjid" },
+          { id: 4, name: "Pantau kebersihan ruang solat" },
+        ];
+
+  const clusters = [
+    {
+      theme: "Ibadah & Imam/Bilal",
+      items: items.filter((c) =>
+        /azan|iqamah|imam|khutbah|solat|wirid/i.test(c.name || "")
+      ),
+    },
+    {
+      theme: "Kewangan",
+      items: items.filter((c) =>
+        /resit|baucar|akaun|kutipan|tabung|bayaran|bajet/i.test(c.name || "")
+      ),
+    },
+    {
+      theme: "Pentadbiran",
+      items: items.filter((c) =>
+        /mesyuarat|minit|surat|rekod|fail|dokumen|jadual/i.test(c.name || "")
+      ),
+    },
+    {
+      theme: "Fasiliti & Keselamatan",
+      items: items.filter((c) =>
+        /kerosakan|penyelenggaraan|keselamatan|peralatan|lampu|kebersihan|pendingin/i.test(
+          c.name || ""
+        )
+      ),
+    },
+    {
+      theme: "Pengimarahan & Program",
+      items: items.filter((c) =>
+        /kuliah|tazkirah|program|ceramah|jemputan|hebah|media/i.test(c.name || "")
+      ),
+    },
+  ].map((cl) => ({
+    ...cl,
+    count: cl.items.length,
+  }));
+
+  res.json({
+    ok: true,
+    sessionId: sessionId || null,
+    totalCards: items.length,
+    clusters,
+  });
+});
+
 /* =========================
  * Utils (cluster)
  * ========================= */
