@@ -40,65 +40,108 @@ const io = new Server(server, {
 const sessions = {}; // { [sessionId]: Array<Card> }
 
 // =====================================
-// FASA 2 (DUMMY): AI Cluster Preview
+// FASA 2 (REAL): AI Cluster Preview (Domain-agnostic)
+// - baca cards dari sessions[sessionId]
+// - embeddings + graph clustering
+// - return clusters dengan items + count + strength
 // =====================================
-app.post("/api/cluster/preview", (req, res) => {
-  const { sessionId, cards } = req.body || {};
+app.post("/api/cluster/preview", async (req, res) => {
+  try {
+    const { sessionId } = req.body || {};
+    const sid = String(sessionId || "").trim();
+    if (!sid) return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
 
-  const items =
-    Array.isArray(cards) && cards.length
-      ? cards
-      : [
-          { id: 1, name: "Laungkan azan waktu Subuh" },
-          { id: 2, name: "Simpan resit kewangan rasmi" },
-          { id: 3, name: "Urus mesyuarat jawatankuasa masjid" },
-          { id: 4, name: "Pantau kebersihan ruang solat" },
-        ];
+    const items = Array.isArray(sessions[sid]) ? sessions[sid] : [];
+    const totalCards = items.length;
 
-  const clusters = [
-    {
-      theme: "Ibadah & Imam/Bilal",
-      items: items.filter((c) =>
-        /azan|iqamah|imam|khutbah|solat|wirid/i.test(c.name || "")
-      ),
-    },
-    {
-      theme: "Kewangan",
-      items: items.filter((c) =>
-        /resit|baucar|akaun|kutipan|tabung|bayaran|bajet/i.test(c.name || "")
-      ),
-    },
-    {
-      theme: "Pentadbiran",
-      items: items.filter((c) =>
-        /mesyuarat|minit|surat|rekod|fail|dokumen|jadual/i.test(c.name || "")
-      ),
-    },
-    {
-      theme: "Fasiliti & Keselamatan",
-      items: items.filter((c) =>
-        /kerosakan|penyelenggaraan|keselamatan|peralatan|lampu|kebersihan|pendingin/i.test(
-          c.name || ""
-        )
-      ),
-    },
-    {
-      theme: "Pengimarahan & Program",
-      items: items.filter((c) =>
-        /kuliah|tazkirah|program|ceramah|jemputan|hebah|media/i.test(c.name || "")
-      ),
-    },
-  ].map((cl) => ({
-    ...cl,
-    count: cl.items.length,
-  }));
+    if (!totalCards) {
+      return res.json({ ok: true, sessionId: sid, totalCards: 0, clusters: [], meta: { note: "Tiada card dalam session." } });
+    }
 
-  res.json({
-    ok: true,
-    sessionId: sessionId || null,
-    totalCards: items.length,
-    clusters,
-  });
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ ok: false, error: "OPENAI_API_KEY belum diset" });
+    }
+
+    // guna activity dahulu, fallback name
+    const filtered = items
+      .map((c) => ({
+        id: c.id,
+        name: String(c?.activity ?? c?.name ?? "").trim(),
+      }))
+      .filter((x) => x.name);
+
+    if (!filtered.length) {
+      return res.json({
+        ok: true,
+        sessionId: sid,
+        totalCards,
+        clusters: [],
+        meta: { note: "Semua card kosong (tiada activity/name)." },
+      });
+    }
+
+    const texts = filtered.map((x) => x.name);
+    const emb = await client.embeddings.create({
+      model: "text-embedding-3-small",
+      input: texts,
+    });
+
+    const vectors = emb.data.map((d) => d.embedding);
+
+    // default param (boleh override dari body)
+    const similarityThreshold = Number(req.body?.similarityThreshold ?? 0.82);
+    const minClusterSize = Number(req.body?.minClusterSize ?? 3);
+    const maxClusters = Number(req.body?.maxClusters ?? 12);
+
+    const comps = buildGraphClusters(vectors, similarityThreshold);
+
+    const valid = comps
+      .filter((c) => c.length >= minClusterSize)
+      .sort((a, b) => b.length - a.length)
+      .slice(0, maxClusters);
+
+    const clusteredIdx = new Set(valid.flat());
+    const unassigned = [];
+    for (let i = 0; i < filtered.length; i++) {
+      if (!clusteredIdx.has(i)) unassigned.push(filtered[i].id);
+    }
+
+    // bina clusters dalam format yang "postProcessClusters" faham (items[])
+    const rawClusters = valid.map((idxs, k) => {
+      const clusterItems = idxs.map((i) => ({
+        id: filtered[i].id,
+        name: filtered[i].name,
+      }));
+
+      const title = keywordTitle(clusterItems.map((x) => x.name), 3);
+
+      return {
+        clusterId: `c${k + 1}`,
+        theme: title,            // theme = tajuk cadangan CU
+        items: clusterItems,     // items wajib ada untuk count
+      };
+    });
+
+    const processed = postProcessClusters(rawClusters, {
+      minStable: 3,
+      keepEmptyClusters: false,
+      sortByCountDesc: true,
+    });
+
+    return res.json({
+      ok: true,
+      sessionId: sid,
+      totalCards: items.length,
+      generatedAt: new Date().toISOString(),
+      params: { similarityThreshold, minClusterSize, maxClusters },
+      clusters: processed.clusters,
+      meta: { ...processed.meta, unassignedCount: unassigned.length, clusteredInput: filtered.length },
+      unassigned,
+    });
+  } catch (e) {
+    console.error("cluster/preview error:", e?.message || e);
+    return res.status(500).json({ ok: false, error: e?.message || "AI cluster preview error" });
+  }
 });
 
 /* =========================
@@ -701,10 +744,10 @@ app.post("/api/myspike/compare", async (req, res) => {
     const dacumWAFromBody = Array.isArray(req.body?.dacumWA)
       ? req.body.dacumWA
       : [];
-    for (const x of dacumWAFromBody) {
-      const t = String(c?.activity ?? c?.name ?? "").trim();
-      if (t) dacumWA.push(t);
-    }
+for (const x of dacumWAFromBody) {
+  const t = String(x || "").trim();
+  if (t) dacumWA.push(t);
+}
 
     if (!dacumWA.length) {
       return res.status(400).json({
@@ -882,14 +925,18 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
     }
 
     // create cluster result + tajuk sementara
-    const clusters = valid.map((idxs, k) => {
-      const clusterTexts = idxs.map((i) => texts[i]);
-      return {
-        clusterId: `c${k + 1}`,
-        title: keywordTitle(clusterTexts, 3),
-        cardIds: idxs.map((i) => idxToCardId[i]),
-      };
-    });
+const clusters = valid.map((idxs, k) => {
+  const clusterItems = idxs.map((i) => ({
+    id: idxToCardId[i],
+    name: texts[i],
+  }));
+
+  return {
+    clusterId: `c${k + 1}`,
+    theme: keywordTitle(clusterItems.map(x => x.name), 3),
+    items: clusterItems,
+  };
+});
 
     const processed = postProcessClusters(clusters, {
       minStable: 3,
