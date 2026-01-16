@@ -841,11 +841,10 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
     }
 
     // texts untuk embedding (filter yang kosong supaya OpenAI tak meragam)
-    const filtered = [];
-    for (const c of items) {
-      const t = String(c?.activity || "").trim();
-      if (t) filtered.push({ id: c.id, text: t });
-    }
+    const filtered = items.map(c => ({
+      id: c.id,
+      text: String(c?.activity || "").trim()
+    }));
 
     if (filtered.length === 0) {
       return res.json({
