@@ -892,11 +892,21 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
       };
     });
 
+    const processed = postProcessClusters(clusters, {
+      minStable: 3,
+      keepEmptyClusters: false,
+      sortByCountDesc: true,
+    });
+    
     return res.json({
+      ok: true,
       sessionId: sid,
       generatedAt: new Date().toISOString(),
       params: { similarityThreshold, minClusterSize, maxClusters },
-      clusters,
+
+      clusters: processed.clusters,
+      meta: processed.meta,
+      
       unassigned,
     });
   } catch (e) {
