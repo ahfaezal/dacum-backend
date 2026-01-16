@@ -702,7 +702,7 @@ app.post("/api/myspike/compare", async (req, res) => {
       ? req.body.dacumWA
       : [];
     for (const x of dacumWAFromBody) {
-      const t = String(x || "").trim();
+      const t = String(c?.activity ?? c?.name ?? "").trim();
       if (t) dacumWA.push(t);
     }
 
@@ -843,8 +843,8 @@ app.post("/cluster/suggest/:sessionId", async (req, res) => {
     // texts untuk embedding (filter yang kosong supaya OpenAI tak meragam)
     const filtered = items.map(c => ({
       id: c.id,
-      text: String(c?.activity || "").trim()
-    }));
+      text: String(c?.activity ?? c?.name ?? "").trim(),
+    })).filter(x => x.text);
 
     if (filtered.length === 0) {
       return res.json({
