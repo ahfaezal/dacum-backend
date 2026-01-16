@@ -120,6 +120,68 @@ function cosineSim(a, b) {
   return denom ? dot / denom : 0;
 }
 
+/**
+ * =========================
+ * Post-processing clusters (RULE-BASED)
+ * - 1 aktiviti hanya boleh berada dalam 1 CU
+ * - buang cluster kosong
+ * - label strength (stable/weak)
+ * =========================
+ */
+function postProcessClusters(rawClusters, opts = {}) {
+  const {
+    minStable = 3,          // >=3 aktiviti => stable (cadangan)
+    keepEmptyClusters = false, // default buang cluster kosong
+    sortByCountDesc = true,
+  } = opts;
+
+  const seenIds = new Set();
+  const cleaned = [];
+
+  for (const cl of Array.isArray(rawClusters) ? rawClusters : []) {
+    const items = Array.isArray(cl.items) ? cl.items : [];
+    const filteredItems = [];
+
+    for (const it of items) {
+      // guna id jika ada; fallback guna name (untuk safety)
+      const key = (it && (it.id ?? it.name)) ?? null;
+      if (key === null) continue;
+
+      if (!seenIds.has(key)) {
+        seenIds.add(key);
+        filteredItems.push(it);
+      }
+    }
+
+    // buang cluster kosong (kecuali jika opts keepEmptyClusters = true)
+    if (!keepEmptyClusters && filteredItems.length === 0) continue;
+
+    const count = filteredItems.length;
+    cleaned.push({
+      ...cl,
+      items: filteredItems,
+      count,
+      strength: count >= minStable ? "stable" : "weak",
+    });
+  }
+
+  if (sortByCountDesc) {
+    cleaned.sort((a, b) => (b.count || 0) - (a.count || 0));
+  }
+
+  // ringkasan isu untuk debug cepat
+  const totalItems = cleaned.reduce((sum, c) => sum + (c.count || 0), 0);
+
+  return {
+    clusters: cleaned,
+    meta: {
+      totalClusters: cleaned.length,
+      totalClusteredItems: totalItems,
+      minStable,
+    },
+  };
+}
+
 function buildGraphClusters(vectors, threshold = 0.82) {
   const n = vectors.length;
   const adj = Array.from({ length: n }, () => []);
