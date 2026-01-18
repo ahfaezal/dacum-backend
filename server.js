@@ -22,6 +22,48 @@ const cheerio = require("cheerio");
 const OpenAI = require("openai");
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/**
+ * =========================
+ * iNOSS – CU Naming Rules (NOSS Compliant)
+ * =========================
+ * - SATU kata kerja sahaja
+ * - TIADA perkataan "dan"
+ * - Format: [Kata Kerja] + [Objek] + [Konteks]
+ */
+
+const CU_OBJECT_MAP = [
+  {
+    keywords: ["dokumen", "dokumentasi", "fail", "rekod", "simpan"],
+    verb: "Urus",
+    object: "Dokumentasi Pengimarahan Masjid"
+  },
+  {
+    keywords: ["solat", "imam", "iqamah", "azan", "fardu", "jumaat"],
+    verb: "Pimpin",
+    object: "Solat Berjemaah"
+  },
+  {
+    keywords: ["wirid", "doa", "zikir"],
+    verb: "Pimpin",
+    object: "Wirid Jemaah"
+  },
+  {
+    keywords: ["minit", "mesyuarat", "surat", "rasmi"],
+    verb: "Sediakan",
+    object: "Minit Mesyuarat Masjid"
+  },
+  {
+    keywords: ["baucar", "kewangan", "resit", "bil", "bayaran"],
+    verb: "Sediakan",
+    object: "Laporan Kewangan Masjid"
+  },
+  {
+    keywords: ["penceramah", "jemput", "undangan"],
+    verb: "Selaras",
+    object: "Penceramah Program Masjid"
+  }
+];
+
 /* =========================
  * App + Server
  * ========================= */
@@ -34,6 +76,89 @@ const server = http.createServer(app);
 const io = new Server(server, {
   cors: { origin: "*" },
 });
+
+/**
+ * =========================
+ * iNOSS – CU Naming Engine (Rule-Based)
+ * =========================
+ * Rules:
+ * - 1 kata kerja sahaja
+ * - tidak boleh ada "dan"
+ * - output: "KATA KERJA + OBJEK"
+ */
+function suggestCUName(activities = []) {
+  const text = String(Array.isArray(activities) ? activities.join(" ") : activities || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  // fallback jika tiada data
+  if (!text) {
+    return {
+      title: "Urus Aktiviti Pengimarahan Masjid",
+      verb: "Urus",
+      object: "Aktiviti Pengimarahan Masjid",
+      confidence: 0.2,
+      reasons: ["fallback:no-activities"],
+    };
+  }
+
+  let best = null;
+  let bestScore = 0;
+  let bestReasons = [];
+
+  for (const map of CU_OBJECT_MAP) {
+    const keywords = Array.isArray(map?.keywords) ? map.keywords : [];
+    let score = 0;
+    const reasons = [];
+
+    for (const kw of keywords) {
+      const k = String(kw || "").toLowerCase().trim();
+      if (!k) continue;
+      if (text.includes(k)) {
+        score += 1;
+        reasons.push(k);
+      }
+    }
+
+    if (score > bestScore) {
+      bestScore = score;
+      best = map;
+      bestReasons = reasons;
+    }
+  }
+
+  // fallback jika tiada padanan
+  if (!best) {
+    return {
+      title: "Urus Aktiviti Pengimarahan Masjid",
+      verb: "Urus",
+      object: "Aktiviti Pengimarahan Masjid",
+      confidence: 0.3,
+      reasons: ["fallback:no-match"],
+    };
+  }
+
+  // pastikan tiada "dan" dalam objek
+  const verb = String(best.verb || "Urus").trim();
+  let object = String(best.object || "Aktiviti Pengimarahan Masjid").trim();
+  object = object.replace(/\bdan\b/gi, "");     // buang perkataan "dan"
+  object = object.replace(/\s+/g, " ").trim();  // kemas whitespace
+
+  // pastikan output ada 1 kata kerja sahaja (kita guna verb dari map, bukan dari text)
+  const title = `${verb} ${object}`.trim();
+
+  // confidence ringkas berdasarkan bil match (maks 5)
+  const confidence = Math.max(0.35, Math.min(0.95, bestScore / 5));
+
+  return {
+    title,
+    verb,
+    object,
+    confidence,
+    reasons: bestReasons,
+  };
+}
 
 /* =========================
  * In-memory storage (MVP)
@@ -382,10 +507,31 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
     const result = {
       sessionId: sid,
       generatedAt: new Date().toISOString(),
-      clusters,
+      clusters: clustersWithSuggestedCU,
       unassigned,
     };
 
+// =========================
+// iNOSS: Suggest CU title (rule-based)
+// =========================
+const clustersWithSuggestedCU = (Array.isArray(clusters) ? clusters : []).map((cl) => {
+  const cardIds = Array.isArray(cl.cardIds) ? cl.cardIds : [];
+
+  const activities = cardIds
+    .map((cid) => {
+      const found = items.find((it) => it.id === cid);
+      return found ? String(found.activity || found.name || "").trim() : "";
+    })
+    .filter(Boolean);
+
+  const suggestedCU = suggestCUName(activities);
+
+  return {
+    ...cl,
+    suggestedCU, // { title, verb, object, confidence, reasons }
+  };
+});
+    
     // store for refresh
     clusterStore[sid] = result;
 
