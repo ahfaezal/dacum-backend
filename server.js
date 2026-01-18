@@ -285,6 +285,47 @@ app.patch("/cards/:session/:id", (req, res) => {
   }
 });
 
+/* ======================================================
+ * COMPAT: /api/cards routes (untuk frontend baru)
+ * - LiveBoard poll guna: GET /api/cards/:sessionId -> { ok:true, items:[...] }
+ * - Panel submit guna: POST /api/cards/:sessionId -> { ok:true, item }
+ * ====================================================== */
+
+// GET: List cards by session (frontend expect {ok:true, items})
+app.get("/api/cards/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const items = Array.isArray(sessions[sid]) ? sessions[sid] : [];
+  return res.json({ ok: true, sessionId: sid, items });
+});
+
+// POST: Create new card for session (frontend panel submit)
+app.post("/api/cards/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+
+  const name = String(req.body?.name || req.body?.activity || "").trim();
+  const activity = String(req.body?.activity || name || "").trim();
+  const panelName = String(req.body?.panelName || "").trim();
+
+  if (!sid) return res.status(400).json({ ok: false, error: "Missing sessionId" });
+  if (!name) return res.status(400).json({ ok: false, error: "Missing name/activity" });
+
+  if (!sessions[sid]) sessions[sid] = [];
+
+  const card = {
+    id: Date.now(),
+    name,
+    activity,
+    panelName,
+    time: new Date().toISOString(),
+  };
+
+  sessions[sid].push(card);
+
+  io.to(sid).emit("card:new", { session: sid, card });
+
+  return res.json({ ok: true, item: card, card });
+});
+
 /* =========================
  * Socket.IO rooms
  * ========================= */
