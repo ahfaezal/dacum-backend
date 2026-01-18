@@ -541,6 +541,32 @@ const clustersWithSuggestedCU = (Array.isArray(clusters) ? clusters : []).map((c
   }
 });
 
+// =========================
+// iNOSS: Session summary (lightweight)
+// =========================
+app.get("/api/session/summary/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const items = Array.isArray(sessions[sid]) ? sessions[sid] : [];
+
+  // kira assigned ikut field yang ada pada card (ikut struktur anda)
+  // cuba beberapa kemungkinan: cuId, cuTitle, assignedCuId, cu
+  const isAssigned = (c) =>
+    !!(c && (c.cuId || c.cuTitle || c.assignedCuId || c.cu));
+
+  const total = items.length;
+  const assigned = items.filter(isAssigned).length;
+  const unassigned = total - assigned;
+
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    total,
+    assigned,
+    unassigned,
+    updatedAt: new Date().toISOString(),
+  });
+});
+
 // GET last result (for refresh)
 app.get("/api/cluster/result/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
