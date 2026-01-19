@@ -79,7 +79,6 @@ const CU_OBJECT_MAP = [
 /* =========================
  * App + Server
  * ========================= */
-const app = express();
 
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
