@@ -1,0 +1,23 @@
+[
+  {
+    "docId": "myspike-masjid-c01",
+    "nossCodeBase": "0841-XXX-4:2021",
+    "cuCode": "C01",
+    "cuTitle": "Pimpinan Solat dan Khutbah",
+    "description": "Melaksanakan tugas imam solat fardu, solat sunat, solat Jumaat serta menyampaikan khutbah."
+  },
+  {
+    "docId": "myspike-masjid-c02",
+    "nossCodeBase": "0841-XXX-4:2021",
+    "cuCode": "C02",
+    "cuTitle": "Pengurusan Program Pengimarahan Masjid",
+    "description": "Merancang, menyelaras dan melaksanakan program pengimarahan seperti pengajian, sambutan hari kebesaran Islam, dakwah media sosial dan hebahan."
+  },
+  {
+    "docId": "myspike-masjid-c03",
+    "nossCodeBase": "0841-XXX-4:2021",
+    "cuCode": "C03",
+    "cuTitle": "Pengurusan Pentadbiran Jawatankuasa Masjid",
+    "description": "Mengurus mesyuarat jawatankuasa, surat-menyurat, dokumentasi, rekod dan hebahan rasmi."
+  }
+]
