@@ -1,1 +1,66 @@
+/**
+ * POST /api/myspike/index/build
+ * Body: { pages?: number }
+ * Tujuan: Crawl beberapa page NOSS list, ambil CP id, extract CU, simpan ke myspike_index.json
+ */
+app.post("/api/myspike/index/build", async (req, res) => {
+  try {
+    const pages = Math.max(1, Math.min(50, Number(req.body?.pages || 3))); // default 3 page, max 50
+    const meta = loadMeta();
+
+    let allCpIds = [];
+    for (let p = 1; p <= pages; p++) {
+      const ids = await fetchNossListPage(p);
+      allCpIds.push(...ids);
+    }
+    allCpIds = Array.from(new Set(allCpIds.map(String)));
+
+    // build CU index
+    const cuItems = [];
+    for (const cpId of allCpIds) {
+      const cuRows = await fetchCuFromCpId(cpId);
+
+      // cuRows sekarang items array yang ada cuTitle dll
+      // Kita simpan sebagai "CU index"
+      for (const x of cuRows) {
+        const cuTitle = String(x.cuTitle || "").trim();
+        if (!cuTitle) continue;
+
+        cuItems.push({
+          source: "myspike",
+          cpId: String(x.cpId || cpId),
+          nossCode: String(x.nossCode || ""),
+          nossTitle: String(x.nossTitle || ""),
+          cuType: String(x.cuType || ""),
+          cuTitle,
+          jdUrl: x.jdUrl || null,
+        });
+      }
+    }
+
+    // dedupe CU by (nossCode + cuTitle)
+    const seen = new Set();
+    const deduped = [];
+    for (const item of cuItems) {
+      const key = `${String(item.nossCode)}::${String(item.cuTitle).toLowerCase()}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      deduped.push(item);
+    }
+
+    saveIndex(deduped);
+
+    const nextMeta = {
+      totalNoss: allCpIds.length,
+      totalCU: deduped.length,
+      lastPage: pages,
+      updatedAt: new Date().toISOString(),
+    };
+    saveMeta(nextMeta);
+
+    return res.json({ ok: true, pages, totals: nextMeta });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
 
