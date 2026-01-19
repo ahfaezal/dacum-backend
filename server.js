@@ -176,6 +176,147 @@ app.get("/", (req, res) => {
   res.send("DACUM Backend OK");
 });
 
+// ===============================
+// MySPIKE CU Index (REAL)
+// ===============================
+const fs = require("fs");
+const path = require("path");
+
+const DATA_DIR = path.join(__dirname, "data");
+const INDEX_FILE = path.join(DATA_DIR, "myspike_index.json");
+const META_FILE = path.join(DATA_DIR, "myspike_index.meta.json");
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function loadIndex() {
+  ensureDataDir();
+  if (!fs.existsSync(INDEX_FILE)) return [];
+  return JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
+}
+
+function saveIndex(items) {
+  ensureDataDir();
+  fs.writeFileSync(INDEX_FILE, JSON.stringify(items, null, 2), "utf8");
+}
+
+function loadMeta() {
+  ensureDataDir();
+  if (!fs.existsSync(META_FILE)) return { totalNoss: 0, totalCU: 0, lastPage: 0, updatedAt: null };
+  return JSON.parse(fs.readFileSync(META_FILE, "utf8"));
+}
+
+function saveMeta(meta) {
+  ensureDataDir();
+  fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), "utf8");
+}
+
+// Crawl NOSS list page (Paparan 1) dan extract link CPC (Paparan 2: index-cp&id=XXX)
+async function fetchNossListPage(page = 1) {
+  // MySPIKE guna DataTables; kadang page param berbeza.
+  // Kita buat cara "paling stabil": scrap semua link index-cp&id=... yang muncul.
+  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-noss&page=${page}`;
+  const html = (await axios.get(url)).data;
+  const $ = cheerio.load(html);
+
+  // cari semua link ke index-cp&id=...
+  const cpIds = new Set();
+  $("a[href*='r=umum-noss%2Findex-cp&id=']").each((_, a) => {
+    const href = $(a).attr("href") || "";
+    const m = href.match(/index-cp&id=(\d+)/);
+    if (m) cpIds.add(m[1]);
+  });
+
+  return Array.from(cpIds);
+}
+
+// Crawl CP page (Paparan 2) dan extract CU rows
+async function fetchCuFromCpId(cpId) {
+  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-cp&id=${cpId}`;
+  const html = (await axios.get(url)).data;
+  const $ = cheerio.load(html);
+
+  // Ambil Kod NOSS + Tajuk NOSS + Tahap (kalau ada di header)
+  const pageText = $("body").text();
+  const nossCodeMatch = pageText.match(/Kod NOSS\s*:\s*([A-Z0-9\-:]+)/i);
+  const nossCode = nossCodeMatch ? nossCodeMatch[1].trim() : "";
+
+  const nossTitleMatch = pageText.match(/Nama NOSS\s*:\s*(.+)/i);
+  const nossTitle = nossTitleMatch ? nossTitleMatch[1].trim().split("\n")[0] : "";
+
+  // CU table: biasanya ada kolum "Tajuk Competency Unit (CU)"
+  const items = [];
+  $("table tbody tr").each((_, tr) => {
+    const tds = $(tr).find("td");
+    if (tds.length < 3) return;
+
+    const cuType = $(tds[1]).text().trim(); // contoh: Core/Elektif
+    const cuTitle = $(tds[2]).text().trim();
+
+    if (!cuTitle) return;
+
+    // JD link (optional) – boleh guna untuk WA later (on-demand)
+    const jdHref = $(tr).find("a[href*='Job Description']").attr("href") || "";
+
+    items.push({
+      source: "myspike",
+      cpId: String(cpId),
+      nossCode,
+      nossTitle,
+      cuType,
+      cuTitle,
+      jdUrl: jdHref || null,
+    });
+  });
+
+  return items;
+}
+
+// Status index
+app.get("/api/myspike/index/status", (req, res) => {
+  const meta = loadMeta();
+  res.json({ ok: true, meta });
+});
+
+// Build index secara batch (supaya tak timeout)
+// Body: { fromPage: 1, toPage: 2 }  -> crawl pages 1..2, collect cpIds, extract CU, append
+app.post("/api/myspike/index/build", async (req, res) => {
+  try {
+    const fromPage = Number(req.body?.fromPage || 1);
+    const toPage = Number(req.body?.toPage || fromPage);
+
+    let index = loadIndex();
+    const meta = loadMeta();
+
+    for (let p = fromPage; p <= toPage; p++) {
+      const cpIds = await fetchNossListPage(p);
+
+      for (const cpId of cpIds) {
+        const cuItems = await fetchCuFromCpId(cpId);
+
+        // append unik (berdasarkan cpId + cuTitle)
+        for (const it of cuItems) {
+          const key = `${it.cpId}::${it.cuTitle}`;
+          const exists = index.some((x) => `${x.cpId}::${x.cuTitle}` === key);
+          if (!exists) index.push(it);
+        }
+      }
+
+      meta.lastPage = Math.max(meta.lastPage || 0, p);
+    }
+
+    meta.totalCU = index.length;
+    meta.updatedAt = new Date().toISOString();
+    saveIndex(index);
+    saveMeta(meta);
+
+    res.json({ ok: true, meta, addedTotalCU: index.length });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
 /**
  * =========================
  * SISTEM 2: MySPIKE Comparator (REAL AI)
