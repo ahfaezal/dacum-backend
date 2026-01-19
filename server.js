@@ -1322,6 +1322,43 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
 });
 
 /**
+ * =========================
+ * Sistem 2 Bridge (Seed WA)
+ * =========================
+ * POST /api/s2/seed-wa
+ * Body: { sessionId: "Masjid", waList: string[] }
+ * Tujuan: Jadikan WA dari Page 2.1 sebagai "kad sementara" dalam sessions[sessionId]
+ */
+app.post("/api/s2/seed-wa", (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
+
+    if (!sessionId) return res.status(400).json({ error: "sessionId diperlukan" });
+    if (!waList.length) return res.status(400).json({ error: "waList kosong" });
+
+    const now = Date.now();
+    sessions[sessionId] = waList
+      .map((wa, i) => String(wa || "").trim())
+      .filter(Boolean)
+      .map((wa, i) => ({
+        id: now + i,
+        wa,      // ini yang compare guna
+        title: wa, // fallback
+        source: "s2-seed",
+      }));
+
+    return res.json({
+      ok: true,
+      sessionId,
+      totalSeeded: sessions[sessionId].length,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+/**
  * POST /api/myspike/compare
  * Body:
  * {
@@ -1342,12 +1379,18 @@ app.post("/api/myspike/compare", async (req, res) => {
 
     const sessionCards = sessions[sessionId] || [];
     const dacumWA = sessionCards
-      .map((c) => (c && c.wa ? String(c.wa).trim() : ""))
+      .map((c) => {
+      if (c?.wa) return String(c.wa).trim();        // WA sebenar (seed / label)
+      if (c?.title) return String(c.title).trim();  // fallback demo
+      if (c?.text) return String(c.text).trim();    // fallback lama
+      return "";
+      })
       .filter(Boolean);
 
     if (!dacumWA.length) {
       return res.status(400).json({
-        error: "Tiada DACUM WA dalam session ini. Pastikan kad DACUM telah dilabel (PATCH /cards/:session/:id dengan field wa).",
+        error:
+          "Tiada DACUM WA dalam session ini. Sama ada seed WA dari Sistem 2 atau label kad DACUM (field wa).",
         hint: { sessionId, totalCardsInSession: sessionCards.length },
       });
     }
