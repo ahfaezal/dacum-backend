@@ -13,12 +13,15 @@
 
 const express = require("express");
 const http = require("http");
+const cors = require("cors");
+const { Server } = require("socket.io");
+
+const app = express();
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "2mb" }));
 
 const server = http.createServer(app);
-
-const cors = require("cors");
-const axios = require("axios");
-const cheerio = require("cheerio");
+const io = new Server(server, { cors: { origin: "*" } });
 
 const PORT = process.env.PORT || 10000;
 
