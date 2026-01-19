@@ -13,10 +13,19 @@
 
 const express = require("express");
 const http = require("http");
-const { Server } = require("socket.io");
+const app = express();
+const server = http.createServer(app);
+
 const cors = require("cors");
 const axios = require("axios");
 const cheerio = require("cheerio");
+
+const PORT = process.env.PORT || 10000;
+
+server.listen(PORT, () => console.log("Listening on", PORT));
+
+const { Server } = require("socket.io");
+const io = new Server(server, { cors: { origin: "*" } });
 
 // ✅ OpenAI SDK v4
 const OpenAI = require("openai");
