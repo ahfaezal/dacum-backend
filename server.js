@@ -358,58 +358,7 @@ function getCardText(card) {
  * Body: { sessionId: "Masjid", waList: string[] }
  * Tujuan: Jadikan WA sebagai "kad sementara" dalam sessions[sessionId]
  */
-app.post("/api/s2/seed-wa", (req, res) => {
-  try {
-    const sessionId = String(req.body?.sessionId || "").trim();
-    const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
 
-    if (!sessionId) {
-      return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
-    }
-    if (!waList.length) {
-      return res
-        .status(400)
-        .json({ ok: false, error: "waList mesti ada sekurang-kurangnya 1 item" });
-    }
-
-    const s = ensureSession(sessionId);
-
-    let added = 0;
-    for (const raw of waList) {
-      const waTitle = String(raw || "").trim();
-      if (!waTitle) continue;
-
-      // elak duplicate berdasarkan waTitle
-      const exists = s.cards.some(
-        (c) => String(c?.waTitle || c?.activity || c?.title || "").trim() === waTitle
-      );
-      if (exists) continue;
-
-      const id = Date.now() + Math.floor(Math.random() * 1000);
-
-      // ✅ Simpan dalam beberapa field supaya mana-mana modul boleh baca
-      s.cards.push({
-        id,
-        createdAt: new Date().toISOString(),
-        source: "seed-wa",
-
-        // Field utama
-        waTitle,
-        activity: waTitle,
-        title: waTitle,
-        text: waTitle,
-      });
-
-      added++;
-    }
-
-    s.updatedAt = new Date().toISOString();
-
-    return res.json({ ok: true, sessionId, totalSeeded: added, totalCards: s.cards.length });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
-  }
-});
 
 /**
  * =========================
