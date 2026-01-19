@@ -76,20 +76,7 @@ const CU_OBJECT_MAP = [
   }
 ];
 
-/* =========================
- * App + Server
- * ========================= */
-const app = express();
-
-app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "2mb" }));
-
-const server = http.createServer(app);
-const io = new Server(server, {
-  cors: { origin: "*" },
-});
-
-/**
+/*
  * =========================
  * iNOSS – CU Naming Engine (Rule-Based)
  * =========================
