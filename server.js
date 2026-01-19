@@ -1326,7 +1326,7 @@ app.post("/api/myspike/parse-wa", async (req, res) => {
  * Sistem 2 Bridge (Seed WA)
  * =========================
  * POST /api/s2/seed-wa
- * Body: { sessionId: "Masjid", waList: string[] }
+ * Body: { sessionId: "ANY_SESSION_ID", waList: string[] }
  * Tujuan: Jadikan WA dari Page 2.1 sebagai "kad sementara" dalam sessions[sessionId]
  */
 app.post("/api/s2/seed-wa", (req, res) => {
@@ -1366,35 +1366,90 @@ app.post("/api/s2/seed-wa", (req, res) => {
  *   urls?: [...],
  *   threshold?: 0.45
  * }
+
+/**
+ * POST /api/myspike/compare
+ * Body:
+ * {
+ *   sessionId?: string,
+ *   threshold?: number,
+ *   topK?: number,
+ *   cuTitle?: string,          // optional: fokus domain CU (cth "Budget Management")
+ *   urls?: string[]            // optional override DEFAULT_MYSPIKE_URLS
+ * }
  */
 app.post("/api/myspike/compare", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "dacum-demo").trim();
+
     const urls =
       Array.isArray(req.body?.urls) && req.body.urls.length
         ? req.body.urls
         : DEFAULT_MYSPIKE_URLS;
 
-    const threshold = Number(req.body?.threshold ?? 0.45);
+    // ✅ guna threshold dari request (UI)
+    const threshold = Number.isFinite(Number(req.body?.threshold))
+      ? Number(req.body.threshold)
+      : 0.45;
 
+    const topK = Number.isFinite(Number(req.body?.topK)) ? Number(req.body.topK) : 6;
+
+    // optional: fokus domain CU (untuk elak "lari" ke domain lain)
+    const cuTitle = String(req.body?.cuTitle || "").trim();
+
+    // =========================
+    // 1) Ambil DACUM WA (seed/label)
+    // =========================
     const sessionCards = sessions[sessionId] || [];
+
+    // buang ayat panjang/“hasil pembelajaran...” supaya similarity tak rosak
+    const stripNoiseWA = (s) => {
+      const t = String(s || "").trim();
+      if (!t) return "";
+
+      const lower = t.toLowerCase();
+
+      // buang baris "hasil pembelajaran..." (biasa muncul dalam MySPIKE)
+      if (
+        lower.includes("hasil pembelajaran unit kompetensi") ||
+        lower.includes("akhir pembelajaran unit kompetensi") ||
+        lower.includes("pelatih hendaklah terampil")
+      ) {
+        return "";
+      }
+
+      // buang yang terlalu panjang (selalunya bukan WA, tapi deskripsi)
+      if (t.length > 180) return "";
+
+      return t;
+    };
+
     const dacumWA = sessionCards
       .map((c) => {
-      if (c?.wa) return String(c.wa).trim();        // WA sebenar (seed / label)
-      if (c?.title) return String(c.title).trim();  // fallback demo
-      if (c?.text) return String(c.text).trim();    // fallback lama
-      return "";
+        // WA sebenar (seed / label)
+        if (c?.wa) return stripNoiseWA(c.wa);
+
+        // fallback demo
+        if (c?.title) return stripNoiseWA(c.title);
+
+        // fallback lama (kurangkan penggunaan; boleh jadi noise)
+        if (c?.text) return stripNoiseWA(c.text);
+
+        return "";
       })
       .filter(Boolean);
 
     if (!dacumWA.length) {
       return res.status(400).json({
         error:
-          "Tiada DACUM WA dalam session ini. Sama ada seed WA dari Sistem 2 atau label kad DACUM (field wa).",
+          "Tiada WA dalam session ini. Pastikan anda sudah 'seed WA' dari Sistem 2 atau label kad DACUM (field wa).",
         hint: { sessionId, totalCardsInSession: sessionCards.length },
       });
     }
 
+    // =========================
+    // 2) Ambil MySPIKE WA (cache)
+    // =========================
     const cacheKey = `${sessionId}::${urls.join("|")}`;
     let items;
 
@@ -1407,55 +1462,116 @@ app.post("/api/myspike/compare", async (req, res) => {
       myspikeCache.set(cacheKey, { fetchedAt: Date.now(), data: items });
     }
 
-    const myspikeWA = [];
-    for (const item of items) for (const w of item.wa || []) myspikeWA.push(w);
+    // kumpul semua WA dari semua CP
+    const myspikeWAAll = [];
+    for (const item of items) for (const w of item.wa || []) myspikeWAAll.push(w);
 
+    // =========================
+    // 3) Dedupe + optional filter ikut CU title
+    // =========================
     const dedupeList = (arr) => {
       const out = [];
       const seen = new Set();
       for (const x of arr) {
-        const n = normalizeText(x);
+        const cleaned = stripNoiseWA(x);
+        if (!cleaned) continue;
+
+        const n = normalizeText(cleaned);
         if (!n || seen.has(n)) continue;
+
         seen.add(n);
-        out.push(String(x).trim());
+        out.push(String(cleaned).trim());
       }
       return out;
     };
 
-    const myspikeList = dedupeList(myspikeWA);
+    let myspikeList = dedupeList(myspikeWAAll);
     const dacumList = dedupeList(dacumWA);
 
+    // ✅ FILTER DOMAIN: bila cuTitle diberi, tapis WA MySPIKE yang ada kaitan
+    // (heuristik: cari perkataan kunci dalam cuTitle, ambil token >=4 huruf)
+    if (cuTitle) {
+      const tokens = normalizeText(cuTitle)
+        .split(" ")
+        .map((x) => x.trim())
+        .filter((x) => x.length >= 4);
+
+      if (tokens.length) {
+        const before = myspikeList.length;
+        myspikeList = myspikeList.filter((w) => {
+          const nw = normalizeText(w);
+          return tokens.some((tk) => nw.includes(tk));
+        });
+
+        // jika terlalu ketat sampai kosong, fallback semula supaya UI tak “kosong”
+        if (!myspikeList.length) {
+          myspikeList = dedupeList(myspikeWAAll);
+        }
+
+        // optional: tambah info debug kecil
+        // console.log("CU filter", cuTitle, tokens, before, myspikeList.length);
+      }
+    }
+
+    // =========================
+    // 4) Compare: MySPIKE WA vs DACUM WA (best match)
+    // =========================
     const matches = [];
     const missingInDacum = [];
 
+    // simpan topK terbaik (bukan 1 sahaja)
+    const bestMatches = (mw) => {
+      const scored = dacumList.map((dw) => ({
+        dw,
+        score: jaccardSimilarity(mw, dw),
+      }));
+      scored.sort((a, b) => b.score - a.score);
+      return scored.slice(0, Math.max(1, topK));
+    };
+
     for (const mw of myspikeList) {
-      let best = { score: -1, dw: null };
-      for (const dw of dacumList) {
-        const s = jaccardSimilarity(mw, dw);
-        if (s > best.score) best = { score: s, dw };
-      }
+      const top = bestMatches(mw);
+      const best = top[0] || { score: -1, dw: null };
 
       if (best.score >= threshold) {
         matches.push({
           myspikeWA: mw,
           bestDacumWA: best.dw,
           score: Number(best.score.toFixed(3)),
+          topK: top.map((x) => ({
+            dacumWA: x.dw,
+            score: Number(x.score.toFixed(3)),
+          })),
         });
       } else {
         missingInDacum.push({
           myspikeWA: mw,
           bestDacumWA: best.dw,
           score: Number(best.score.toFixed(3)),
+          topK: top.map((x) => ({
+            dacumWA: x.dw,
+            score: Number(x.score.toFixed(3)),
+          })),
         });
       }
     }
 
-    const matchedDacumNorm = new Set(matches.map((m) => normalizeText(m.bestDacumWA)));
-    const extraInDacum = dacumList.filter((dw) => !matchedDacumNorm.has(normalizeText(dw)));
+    // extra: WA yang DACUM ada tapi MySPIKE tak padan (ikut threshold)
+    const matchedDacumNorm = new Set(
+      matches.map((m) => normalizeText(m.bestDacumWA || ""))
+    );
+    const extraInDacum = dacumList.filter(
+      (dw) => !matchedDacumNorm.has(normalizeText(dw))
+    );
 
+    // =========================
+    // 5) Response
+    // =========================
     return res.json({
       sessionId,
       threshold,
+      topK,
+      cuTitle: cuTitle || null,
       myspike: {
         total: myspikeList.length,
         itemsSummary: items.map((x) => ({
@@ -1477,12 +1593,4 @@ app.post("/api/myspike/compare", async (req, res) => {
       detail: String(err?.message || err),
     });
   }
-});
-
-/* =========================
- * Port
- * ========================= */
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log("DACUM Backend running on port", PORT);
 });
