@@ -312,6 +312,260 @@ app.post("/api/myspike/index/build", async (req, res) => {
 
 /**
  * =========================
+ * Sessions store (pastikan wujud)
+ * =========================
+ * Jika dalam server.js Prof dah ada `sessions`, JANGAN duplicate.
+ * Kalau belum ada, kekalkan ini.
+ */
+
+/**
+ * Helper: pastikan session wujud
+ */
+function ensureSession(sessionId) {
+  if (!sessions[sessionId]) {
+    sessions[sessionId] = {
+      sessionId,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      cards: [],
+    };
+  }
+  if (!Array.isArray(sessions[sessionId].cards)) sessions[sessionId].cards = [];
+  return sessions[sessionId];
+}
+
+/**
+ * Helper: ambil text kad (fallback pelbagai field)
+ * Ini yang selesaikan isu "Semua card kosong".
+ */
+function getCardText(card) {
+  return String(
+    card?.activity ||
+      card?.activityTitle ||
+      card?.waTitle ||
+      card?.title ||
+      card?.text ||
+      card?.name ||
+      ""
+  ).trim();
+}
+
+/**
+ * =========================
+ * Sistem 2 Bridge (Seed WA)
+ * =========================
+ * POST /api/s2/seed-wa
+ * Body: { sessionId: "Masjid", waList: string[] }
+ * Tujuan: Jadikan WA sebagai "kad sementara" dalam sessions[sessionId]
+ */
+app.post("/api/s2/seed-wa", (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
+
+    if (!sessionId) {
+      return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
+    }
+    if (!waList.length) {
+      return res
+        .status(400)
+        .json({ ok: false, error: "waList mesti ada sekurang-kurangnya 1 item" });
+    }
+
+    const s = ensureSession(sessionId);
+
+    let added = 0;
+    for (const raw of waList) {
+      const waTitle = String(raw || "").trim();
+      if (!waTitle) continue;
+
+      // elak duplicate berdasarkan waTitle
+      const exists = s.cards.some(
+        (c) => String(c?.waTitle || c?.activity || c?.title || "").trim() === waTitle
+      );
+      if (exists) continue;
+
+      const id = Date.now() + Math.floor(Math.random() * 1000);
+
+      // ✅ Simpan dalam beberapa field supaya mana-mana modul boleh baca
+      s.cards.push({
+        id,
+        createdAt: new Date().toISOString(),
+        source: "seed-wa",
+
+        // Field utama
+        waTitle,
+        activity: waTitle,
+        title: waTitle,
+        text: waTitle,
+      });
+
+      added++;
+    }
+
+    s.updatedAt = new Date().toISOString();
+
+    return res.json({ ok: true, sessionId, totalSeeded: added, totalCards: s.cards.length });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/**
+ * =========================
+ * Debug: List Cards by Session
+ * =========================
+ * GET /api/s2/cards?sessionId=Masjid
+ */
+app.get("/api/s2/cards", (req, res) => {
+  try {
+    const sessionId = String(req.query?.sessionId || "").trim();
+    if (!sessionId) {
+      return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
+    }
+
+    const s = ensureSession(sessionId);
+    const cards = Array.isArray(s.cards) ? s.cards : [];
+
+    return res.json({
+      ok: true,
+      sessionId,
+      totalCards: cards.length,
+      sampleKeys: cards[0] ? Object.keys(cards[0]) : [],
+      cardsPreview: cards.slice(0, 20), // cukup untuk semak, elak response besar
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/**
+ * =========================
+ * AI Cluster Preview
+ * =========================
+ * POST /api/cluster/preview
+ * Body: { sessionId, similarityThreshold, minClusterSize }
+ * Nota: Ini versi "minimal & selamat" — fokus buang isu card kosong.
+ */
+app.post("/api/cluster/preview", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const similarityThreshold = Number(req.body?.similarityThreshold ?? 0.55);
+    const minClusterSize = Number(req.body?.minClusterSize ?? 2);
+
+    if (!sessionId) {
+      return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
+    }
+
+    const s = ensureSession(sessionId);
+    const cards = Array.isArray(s.cards) ? s.cards : [];
+
+    if (!cards.length) {
+      return res.json({
+        ok: true,
+        sessionId,
+        totalCards: 0,
+        clusters: [],
+        unassigned: [],
+        meta: { note: "Tiada card dalam session." },
+      });
+    }
+
+    // 1) Ambil text daripada kad
+    const items = cards
+      .map((c) => ({ id: c.id, text: getCardText(c) }))
+      .filter((x) => x.text);
+
+    if (!items.length) {
+      return res.json({
+        ok: true,
+        sessionId,
+        totalCards: cards.length,
+        clusters: [],
+        unassigned: cards.map((c) => c.id),
+        meta: { note: "Semua card kosong (tiada activity/title/name/text)." },
+      });
+    }
+
+    /**
+     * 2) Clustering ringkas (baseline)
+     * - Untuk sekarang: kita tak guna embedding dulu.
+     * - Kita buat grouping berdasarkan keyword overlap ringkas.
+     * - Lepas confirm flow, baru upgrade ke OpenAI embeddings / model.
+     */
+    function tokenize(t) {
+      return String(t)
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter(Boolean);
+    }
+    function jaccard(a, b) {
+      const A = new Set(a);
+      const B = new Set(b);
+      let inter = 0;
+      for (const x of A) if (B.has(x)) inter++;
+      const union = A.size + B.size - inter;
+      return union ? inter / union : 0;
+    }
+
+    const tokens = items.map((it) => ({ ...it, tok: tokenize(it.text) }));
+    const used = new Set();
+    const clusters = [];
+
+    for (let i = 0; i < tokens.length; i++) {
+      if (used.has(tokens[i].id)) continue;
+
+      const group = [tokens[i]];
+      used.add(tokens[i].id);
+
+      for (let j = i + 1; j < tokens.length; j++) {
+        if (used.has(tokens[j].id)) continue;
+        const sim = jaccard(tokens[i].tok, tokens[j].tok);
+        if (sim >= similarityThreshold) {
+          group.push(tokens[j]);
+          used.add(tokens[j].id);
+        }
+      }
+
+      if (group.length >= minClusterSize) {
+        clusters.push({
+          clusterId: `C${clusters.length + 1}`,
+          cardIds: group.map((g) => g.id),
+          sample: group.map((g) => g.text).slice(0, 5),
+        });
+      } else {
+        // kalau tak cukup min size, keluarkan balik dari "used"
+        for (const g of group) used.delete(g.id);
+      }
+    }
+
+    const assignedIds = new Set(clusters.flatMap((c) => c.cardIds));
+    const unassigned = cards.map((c) => c.id).filter((id) => !assignedIds.has(id));
+
+    return res.json({
+      ok: true,
+      sessionId,
+      totalCards: cards.length,
+      clusters,
+      unassigned,
+      meta: {
+        note:
+          clusters.length
+            ? "Preview clustering siap."
+            : "Tiada cluster memenuhi threshold/minClusterSize. Cuba turunkan threshold atau tambah kad.",
+        similarityThreshold,
+        minClusterSize,
+        usableTextCount: items.length,
+      },
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e) });
+  }
+});
+
+/**
+ * =========================
  * SISTEM 2: MySPIKE Comparator (REAL AI)
  * =========================
  */
