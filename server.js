@@ -347,6 +347,33 @@ app.post("/socket/join", (req, res) => {
   return res.json({ ok: true, note: "Join room perlu dibuat dari Socket.IO client." });
 });
 
+// =========================
+// AI Helper: Generate CU Title
+// =========================
+async function aiGenerateCuTitle(items) {
+  const prompt = `
+Berikut ialah senarai aktiviti kerja masjid.
+Cadangkan satu nama CU (Competency Unit) yang sesuai,
+ringkas, profesional, dan bersifat NOSS.
+
+Aktiviti:
+- ${items.join("\n- ")}
+
+Jawapan dalam 5–7 perkataan sahaja.
+`;
+
+  const res = await client.chat.completions.create({
+    model: "gpt-4o-mini",
+    temperature: 0.3,
+    messages: [
+      { role: "system", content: "Jawab dengan satu frasa sahaja." },
+      { role: "user", content: prompt },
+    ],
+  });
+
+  return res.choices[0].message.content.trim();
+}
+
 /* ======================================================
  * FASA 2A (OPTIONAL): AI Cluster Preview (Embeddings + Graph)
  * - Ini masih berguna untuk debug / eksperimen
@@ -420,18 +447,22 @@ app.post("/api/cluster/preview", async (req, res) => {
       if (!clusteredIdx.has(i)) unassigned.push(filtered[i].id);
     }
 
-    const rawClusters = valid.map((idxs, k) => {
-      const clusterItems = idxs.map((i) => ({
-        id: filtered[i].id,
-        name: texts[i],
-      }));
+    const rawClusters = await Promise.all(
+      valid.map(async (idxs, k) => {
+    const clusterItems = idxs.map((i) => ({
+      id: filtered[i].id,
+      name: texts[i],
+    }));
 
-      return {
-        clusterId: `c${k + 1}`,
-        theme: keywordTitle(clusterItems.map((x) => x.name), 3),
-        items: clusterItems,
-      };
-    });
+    const aiTitle = await aiGenerateCuTitle(clusterItems.map((x) => x.name));
+
+    return {
+      clusterId: `C${k + 1}`,
+      title: aiTitle || keywordTitle(clusterItems.map((x) => x.name), 3),
+      items: clusterItems,
+    };
+  })
+);
 
     const processed = postProcessClusters(rawClusters, {
       minStable: 3,
