@@ -14,6 +14,8 @@
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const axios = require("axios");
+const cheerio = require("cheerio");
 const { Server } = require("socket.io");
 
 const app = express();
