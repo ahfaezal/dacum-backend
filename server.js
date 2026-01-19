@@ -580,66 +580,156 @@ async function fetchNossListPage(page = 1) {
   return { url, cpIds: Array.from(cpIds) };
 }
 
-// CPC page -> extract JD links
+// ===============================
+// PATCH 1: CPC page -> extract JD links (lebih robust)
+// ===============================
 async function fetchJdLinksFromCpId(cpId) {
   const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-cp&id=${cpId}`;
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 
-  const bodyText = norm($("body").text());
-  const nossCodeMatch = bodyText.match(/Kod NOSS\s*:\s*([A-Z0-9:-]+)/i);
-  const nossCode = nossCodeMatch ? norm(nossCodeMatch[1]) : "";
+  // helper: baca field dalam jadual label->value (kalau ada)
+  const readFieldFromTable = (labelRegex) => {
+    let val = "";
+    $("tr").each((_, tr) => {
+      const tds = $(tr).find("td,th");
+      if (tds.length < 2) return;
+      const left = norm($(tds[0]).text());
+      const right = norm($(tds[1]).text());
+      if (labelRegex.test(left) && right) val = right;
+    });
+    return val;
+  };
 
-  const nossNameMatch = bodyText.match(/Nama NOSS\s*:\s*([^\n]+)\s*/i);
-  const nossTitle = nossNameMatch ? norm(nossNameMatch[1]) : "";
+  const nossCode = readFieldFromTable(/Kod\s*NOSS/i);
+  const nossTitle = readFieldFromTable(/Nama\s*NOSS/i);
 
-  const jdLinks = [];
-  $("a[href*='r=umum-noss%2Fview']").each((_, a) => {
-    const href = $(a).attr("href") || "";
-    const full = absUrl(href);
-    const m = full.match(/[?&]id=(\d+)/);
-    if (m) jdLinks.push({ jdId: String(m[1]), jdUrl: full });
+  // 1) Tangkap semua link view (JD) dalam CPC
+  // MySPIKE kadang guna:
+  // - r=umum-noss%2Fview&id=123
+  // - r=umum-noss/view&id=123
+  // - /index.php?r=umum-noss%2Fview&id=123
+  // - index.php?r=umum-noss%2Fview&id=123
+  const jdLinks = new Map(); // jdId -> {jdId, jdUrl, anchorText}
+
+  $("a[href]").each((_, a) => {
+    const hrefRaw = $(a).attr("href") || "";
+    const full = absUrl(hrefRaw);
+
+    // match mana-mana view&id=123
+    const m = full.match(/r=umum-noss(?:%2F|\/)view&?id=(\d+)/i) || full.match(/[?&]id=(\d+)/);
+    if (!m) return;
+
+    // pastikan benar-benar page view (bukan page lain yg kebetulan ada id)
+    if (!/umum-noss(?:%2F|\/)view/i.test(full)) return;
+
+    const jdId = String(m[1]);
+    const anchorText = norm($(a).text());
+
+    // elak link "view" yang kosong teks (kadang icon)
+    if (!jdLinks.has(jdId)) {
+      jdLinks.set(jdId, { jdId, jdUrl: full, anchorText: anchorText || "" });
+    }
   });
 
-  // uniq
-  const seen = new Set();
-  const uniq = [];
-  for (const x of jdLinks) {
-    if (seen.has(x.jdId)) continue;
-    seen.add(x.jdId);
-    uniq.push(x);
-  }
-
-  return { cpId: String(cpId), url, nossCode, nossTitle, jdLinks: uniq };
+  return {
+    cpId: String(cpId),
+    url,
+    nossCode,
+    nossTitle,
+    jdLinks: Array.from(jdLinks.values()),
+  };
 }
 
-// JD page -> extract Kod CU + Tajuk CU + Penerangan CU
+// ===============================
+// PATCH 2: JD page -> extract Kod CU + Tajuk CU + Penerangan CU (scan table)
+// ===============================
 async function fetchCuFromJd(jdId) {
   const url = `https://www.myspike.my/index.php?r=umum-noss%2Fview&id=${jdId}`;
   const html = await fetchHtml(url);
   const $ = cheerio.load(html);
 
-  const text = norm($("body").text());
-
-  const cuCodeMatch =
-    text.match(/Kod CU\s+([A-Z0-9:-]+-C\d{2})\b/i) ||
-    text.match(/Kod CU\s+([A-Z0-9:-]+-C\d)\b/i);
-
-  const cuTitleMatch = text.match(/Tajuk CU\s+(.+?)\s+(Penerangan CU|Tempoh Latihan|Objektif Pembelajaran|Upon completion|Pra-Syarat|Version)/i);
-  const cuDescMatch = text.match(/Penerangan CU\s+(.+?)\s+(Tempoh Latihan|Objektif Pembelajaran|Upon completion|Pra-Syarat|Version)/i);
-
-  const programMatch = text.match(/Nama Program\s+(.+?)\s+\[([A-Z0-9:-]+)\]/i);
-
-  return {
+  const out = {
     jdId: String(jdId),
     jdUrl: url,
-    cuCode: cuCodeMatch ? norm(cuCodeMatch[1]) : "",
-    cuTitle: cuTitleMatch ? norm(cuTitleMatch[1]) : "",
-    cuDesc: cuDescMatch ? norm(cuDescMatch[1]) : "",
-    programName: programMatch ? norm(programMatch[1]) : "",
-    nossCode: programMatch ? norm(programMatch[2]) : "",
+    cuCode: "",
+    cuTitle: "",
+    cuDesc: "",
+    programName: "",
+    nossCode: "",
     source: "myspike",
   };
+
+  // helper: extract value ikut label dalam jadual
+  const readField = (labelRegex) => {
+    let val = "";
+    $("tr").each((_, tr) => {
+      const tds = $(tr).find("td,th");
+      if (tds.length < 2) return;
+
+      const left = norm($(tds[0]).text());
+      if (!labelRegex.test(left)) return;
+
+      // ambil teks "kanan" dengan lebih kemas (kadang ada <br>, <li>)
+      const rightCell = $(tds[1]);
+
+      // cuba list item dahulu
+      const li = rightCell.find("li");
+      if (li.length) {
+        const parts = [];
+        li.each((__, x) => {
+          const t = norm($(x).text());
+          if (t) parts.push(t);
+        });
+        if (parts.length) {
+          val = parts.join(" | ");
+          return;
+        }
+      }
+
+      // fallback: plain text
+      const right = norm(rightCell.text());
+      if (right) val = right;
+    });
+
+    return val;
+  };
+
+  // MySPIKE biasanya ada label ini (BM/BI)
+  // Kod CU / CU Code
+  out.cuCode = readField(/Kod\s*CU|CU\s*Code/i);
+
+  // Tajuk CU / CU Title
+  out.cuTitle = readField(/Tajuk\s*CU|CU\s*Title/i);
+
+  // Penerangan CU / CU Description
+  out.cuDesc = readField(/Penerangan\s*CU|CU\s*Description/i);
+
+  // Kadang ada Nama Program + Kod NOSS dalam header/jadual
+  out.programName = readField(/Nama\s*Program|Program\s*Name/i);
+  const nossMaybe = readField(/Kod\s*NOSS|NOSS\s*Code/i);
+  out.nossCode = nossMaybe || out.nossCode;
+
+  // Fallback tambahan: kalau Kod CU kosong, cuba cari pattern kod dalam body text
+  if (!out.cuCode) {
+    const bodyText = norm($("body").text());
+    const m =
+      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d{2})/i) ||
+      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d)/i);
+    if (m) out.cuCode = norm(m[1]);
+  }
+
+  // Fallback tambahan: kalau tajuk kosong, cuba ambil dari h1/title
+  if (!out.cuTitle) {
+    out.cuTitle = norm($("h1").first().text()) || norm($("title").text());
+  }
+
+  // Trim final
+  out.cuCode = norm(out.cuCode);
+  out.cuTitle = norm(out.cuTitle);
+  out.cuDesc = norm(out.cuDesc);
+
+  return out;
 }
 
 // Status index
