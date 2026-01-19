@@ -179,8 +179,6 @@ app.get("/", (req, res) => {
 // ===============================
 // MySPIKE CU Index (REAL)
 // ===============================
-const path = require("path");
-
 const DATA_DIR = path.join(__dirname, "data");
 const INDEX_FILE = path.join(DATA_DIR, "myspike_index.json");
 const META_FILE = path.join(DATA_DIR, "myspike_index.meta.json");
