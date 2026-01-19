@@ -13,7 +13,7 @@
 
 const express = require("express");
 const http = require("http");
-const app = express();
+
 const server = http.createServer(app);
 
 const cors = require("cors");
@@ -79,6 +79,7 @@ const CU_OBJECT_MAP = [
 /* =========================
  * App + Server
  * ========================= */
+const app = express();
 
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
