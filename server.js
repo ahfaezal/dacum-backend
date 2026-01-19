@@ -759,7 +759,7 @@ app.post("/api/myspike/index/build", async (req, res) => {
           const cu = await fetchCuFromJd(jd.jdId);
 
           // Guard: mesti ada cuCode & cuTitle
-          if (!cu.cuCode || !cu.cuTitle) continue;
+          if (!cu.cuTitle) continue;
 
           // de-dup by cuCode (paling stabil)
           const exists = index.some((x) => String(x.cuCode) === String(cu.cuCode));
