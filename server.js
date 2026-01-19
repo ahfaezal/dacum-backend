@@ -176,6 +176,176 @@ app.get("/", (req, res) => {
   res.send("DACUM Backend OK");
 });
 
+/**
+ * =========================
+ * SISTEM 2: MySPIKE Comparator (REAL AI)
+ * =========================
+ */
+
+function cosineSimilarity(a, b) {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
+
+function confidenceLabel(score) {
+  if (score >= 0.85) return "HIGH";
+  if (score >= 0.78) return "MEDIUM";
+  if (score >= 0.70) return "LOW";
+  return "NONE";
+}
+
+function buildCuText(cu) {
+  const title = String(cu.cuTitle || "").trim();
+  const code = String(cu.cuCode || "").trim();
+  const acts = Array.isArray(cu.activities) ? cu.activities : [];
+  const actTitles = acts
+    .map((a) => String(a.waTitle || "").trim())
+    .filter(Boolean)
+    .join("; ");
+  return `CU ${code}: ${title}\nAktiviti: ${actTitles}`.trim();
+}
+
+function buildMyspikeText(item) {
+  const title = String(item.cuTitle || "").trim();
+  const code = String(item.cuCode || "").trim();
+  const desc = String(item.description || "").trim();
+  return `MySPIKE CU ${code}: ${title}\nHuraian: ${desc}`.trim();
+}
+
+// In-memory cache
+let MY_SPIKE_ITEMS = null;
+let MY_SPIKE_EMB = null;
+let MY_SPIKE_LOADED_AT = null;
+
+function loadMyspikeSeed() {
+  if (MY_SPIKE_ITEMS) return MY_SPIKE_ITEMS;
+  const p = path.join(__dirname, "data", "myspike_cu_seed.json");
+  const raw = fs.readFileSync(p, "utf8");
+  MY_SPIKE_ITEMS = JSON.parse(raw);
+  return MY_SPIKE_ITEMS;
+}
+
+async function ensureMyspikeEmbeddings({ model = "text-embedding-3-small" } = {}) {
+  if (
+    MY_SPIKE_ITEMS &&
+    MY_SPIKE_EMB &&
+    MY_SPIKE_ITEMS.length === MY_SPIKE_EMB.length
+  ) {
+    return;
+  }
+  const items = loadMyspikeSeed();
+  const inputs = items.map(buildMyspikeText);
+
+  const emb = await client.embeddings.create({
+    model,
+    input: inputs
+  });
+
+  MY_SPIKE_EMB = emb.data.map((d) => d.embedding);
+  MY_SPIKE_LOADED_AT = new Date().toISOString();
+}
+
+/**
+ * POST /api/s2/compare
+ */
+app.post("/api/s2/compare", async (req, res) => {
+  try {
+    const { sessionId, meta, cus, options } = req.body || {};
+    const list = Array.isArray(cus) ? cus : [];
+
+    if (!list.length) {
+      return res
+        .status(400)
+        .json({ error: "cus kosong. Sila hantar sekurang-kurangnya 1 CU." });
+    }
+
+    const thresholdAda = Number(options?.thresholdAda ?? 0.78);
+    const topK = Math.max(1, Math.min(10, Number(options?.topK ?? 3)));
+
+    await ensureMyspikeEmbeddings({ model: "text-embedding-3-small" });
+    const myItems = MY_SPIKE_ITEMS || [];
+    const myEmb = MY_SPIKE_EMB || [];
+
+    const cuTexts = list.map(buildCuText);
+    const cuEmbRes = await client.embeddings.create({
+      model: "text-embedding-3-small",
+      input: cuTexts
+    });
+    const cuEmb = cuEmbRes.data.map((d) => d.embedding);
+
+    const results = list.map((cu, idx) => {
+      const vec = cuEmb[idx];
+      const scored = myItems.map((item, j) => {
+        const score = cosineSimilarity(vec, myEmb[j]);
+        return {
+          docId: item.docId,
+          cuCode: item.cuCode,
+          cuTitle: item.cuTitle,
+          score: Number(score.toFixed(4))
+        };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, topK);
+
+      const best = top[0] ? top[0].score : 0;
+      const conf = confidenceLabel(best);
+      const status = best >= thresholdAda ? "ADA" : "TIADA";
+
+      return {
+        input: {
+          cuCode: cu.cuCode,
+          cuTitle: cu.cuTitle,
+          activitiesCount: Array.isArray(cu.activities) ? cu.activities.length : 0
+        },
+        decision: {
+          status,
+          bestScore: best,
+          confidence: conf,
+          thresholdAda
+        },
+        matches: top
+      };
+    });
+
+    return res.json({
+      ok: true,
+      sessionId: sessionId || meta?.sessionId || "unknown",
+      meta: meta || {},
+      myspike: {
+        source: "seed",
+        loadedAt: MY_SPIKE_LOADED_AT,
+        totalCandidates: myItems.length,
+        embeddingModel: "text-embedding-3-small"
+      },
+      summary: {
+        totalCU: results.length,
+        ada: results.filter((r) => r.decision.status === "ADA").length,
+        tiada: results.filter((r) => r.decision.status === "TIADA").length
+      },
+      results,
+      generatedAt: new Date().toISOString()
+    });
+  } catch (e) {
+    console.error("S2 compare error:", e);
+    return res.status(500).json({
+      error: "Gagal buat perbandingan MySPIKE",
+      detail: String(e?.message || e)
+    });
+  }
+});
+
 /* =========================
  * DEBUG: OpenAI connection
  * ========================= */
