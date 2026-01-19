@@ -22,6 +22,9 @@ const cheerio = require("cheerio");
 const OpenAI = require("openai");
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const fs = require("fs");
+const path = require("path");
+
 /**
  * =========================
  * iNOSS – CU Naming Rules (NOSS Compliant)
