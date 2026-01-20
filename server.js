@@ -389,20 +389,10 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
       clusterStore[sid] = result;
       return res.json(result);
 
-          clusterStore[sid] = result;
-          return res.json(result);
         } catch (e) {
           return res.status(500).json({ error: e?.message || "AI cluster run error" });
         }
       });
-
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => {
-  console.log("🚀 Server listening on", PORT);
-
 
 /* ======================================================
  * 4) SISTEM 2 Bridge (Seed WA)
@@ -953,4 +943,12 @@ app.get("/debug/openai", async (req, res) => {
       detail: e?.response?.data || null,
     });
   }
+});
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log("🚀 Server listening on", PORT);
 });
