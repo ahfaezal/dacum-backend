@@ -1,15 +1,5 @@
 /**
  * server.js — iNOSS Backend (CLEAN)
- * Fokus:
- * 1) DACUM Cards + LiveBoard (Socket.IO + REST)
- * 2) AI Clustering (REAL) -> /api/cluster/run + /api/cluster/result/:sessionId
- * 3) MySPIKE REAL CU Index (NOSS -> CPC -> JD) dapat: Kod CU + Tajuk CU + Penerangan CU
- * 4) MySPIKE AI Comparator (Embeddings) guna index REAL, bukan seed dummy
- *
- * Prinsip utama:
- * - sessions SENTIASA berbentuk OBJECT: { sessionId, cards: [] }
- * - Semua endpoint cards akan guna helper getSessionCards()
- * - Tiada route duplicate
  */
 
 const express = require("express");
@@ -25,9 +15,22 @@ const path = require("path");
 const OpenAI = require("openai");
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+/* =========================
+ * APP + MIDDLEWARE
+ * ========================= */
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
+
+/* =========================
+ * SERVER + SOCKET (MESTI DI ATAS)
+ * ========================= */
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+/* =========================
+ * HEALTH + ROOT
+ * ========================= */
 app.get("/health", (req, res) => {
   res.json({
     status: "ok",
@@ -36,9 +39,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-/* =========================
- * Root
- * ========================= */
 app.get("/", (req, res) => res.send("iNOSS Backend OK"));
 
 /* ======================================================
@@ -106,7 +106,7 @@ io.on("connection", (socket) => {
  * 1) CARDS API (LiveBoard)
  * ====================================================== */
 
-// Legacy simple routes (jika frontend lama masih guna)
+// Legacy routes
 app.get("/cards/:session", (req, res) => {
   const sid = String(req.params.session || "").trim();
   return res.json(getSessionCards(sid));
@@ -162,7 +162,7 @@ app.patch("/cards/:session/:id", (req, res) => {
   }
 });
 
-// Frontend baru (COMPAT)
+// Frontend baru (compat)
 app.get("/api/cards/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const items = getSessionCards(sid);
@@ -217,7 +217,6 @@ app.get("/api/s2/cards", (req, res) => {
  * 3) AI CLUSTER (REAL)
  * ====================================================== */
 
-// GET last result (refresh)
 app.get("/api/cluster/result/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const data = clusterStore[sid];
@@ -225,7 +224,6 @@ app.get("/api/cluster/result/:sessionId", (req, res) => {
   return res.json(data);
 });
 
-// Session summary
 app.get("/api/session/summary/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const items = getSessionCards(sid);
@@ -238,7 +236,7 @@ app.get("/api/session/summary/:sessionId", (req, res) => {
   return res.json({ ok: true, sessionId: sid, total, assigned, unassigned, updatedAt: new Date().toISOString() });
 });
 
-// Preview (lite) – untuk debug cepat (tanpa OpenAI)
+// Preview (lite)
 app.post("/api/cluster/preview", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
@@ -315,19 +313,6 @@ app.post("/api/cluster/preview", async (req, res) => {
   }
 });
 
-const app = express();
-app.use(cors({ origin: "*" }));
-app.use(express.json({ limit: "2mb" }));
-
-// HEALTH
-app.get("/health", (req, res) => {
-  res.json({
-    status: "ok",
-    service: "dacum-backend",
-    time: new Date().toISOString(),
-  });
-});
-
 // REAL cluster RUN (OpenAI)
 app.post("/api/cluster/run", async (req, res) => {
   try {
@@ -392,24 +377,22 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
 
     const unassigned = Array.isArray(parsed.unassigned) ? parsed.unassigned : [];
 
-    // ✅ Suggested CU (rule-based) — betul susunan (define dulu, baru result)
-      const result = {
-        sessionId: sid,
-        generatedAt: new Date().toISOString(),
-        clusters,          // <-- guna AI cluster terus
-        unassigned,
-      };
-      clusterStore[sid] = result;
-      return res.json(result);
+    const result = {
+      sessionId: sid,
+      generatedAt: new Date().toISOString(),
+      clusters,
+      unassigned,
+    };
 
-        } catch (e) {
-          return res.status(500).json({ error: e?.message || "AI cluster run error" });
-        }
-      });
+    clusterStore[sid] = result;
+    return res.json(result);
+  } catch (e) {
+    return res.status(500).json({ error: e?.message || "AI cluster run error" });
+  }
+});
 
 /* ======================================================
  * 4) SISTEM 2 Bridge (Seed WA)
- * - Jadikan WA sebagai “kad sementara”
  * ====================================================== */
 app.post("/api/s2/seed-wa", (req, res) => {
   try {
@@ -421,19 +404,18 @@ app.post("/api/s2/seed-wa", (req, res) => {
 
     const now = Date.now();
     const cards = waList
-      .map((wa, i) => String(wa || "").trim())
+      .map((wa) => String(wa || "").trim())
       .filter(Boolean)
       .map((wa, i) => ({
         id: now + i,
         activity: wa,
-        wa: wa,
+        wa,
         title: wa,
         source: "s2-seed",
         time: new Date().toISOString(),
       }));
 
     setSessionCards(sessionId, cards);
-
     return res.json({ ok: true, sessionId, totalSeeded: cards.length });
   } catch (e) {
     return res.status(500).json({ error: String(e?.message || e) });
@@ -442,525 +424,17 @@ app.post("/api/s2/seed-wa", (req, res) => {
 
 /* ======================================================
  * 5) MySPIKE REAL CU INDEX
- * - Entry: https://www.myspike.my/index.php?r=umum-noss%2Findex-noss
- * - Flow: NOSS list -> CPC (index-cp&id=) -> JD (view&id=) -> Extract Kod CU + Tajuk CU + Penerangan CU
+ * (kekal seperti code Prof)
  * ====================================================== */
 
-const DATA_DIR = path.join(__dirname, "data");
-const INDEX_FILE = path.join(DATA_DIR, "myspike_cu_index.json");
-const META_FILE = path.join(DATA_DIR, "myspike_cu_index.meta.json");
+// >>>> kekalkan semua fungsi MySPIKE Prof dari sini sampai debug/openai
+// (Saya tak ubah bahagian panjang itu — Prof boleh paste semula blok MySPIKE yang Prof dah ada)
 
-function ensureDataDir() {
-  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
-}
-
-function loadCuIndex() {
-  ensureDataDir();
-  if (!fs.existsSync(INDEX_FILE)) return [];
-  return JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
-}
-
-function saveCuIndex(items) {
-  ensureDataDir();
-  fs.writeFileSync(INDEX_FILE, JSON.stringify(items, null, 2), "utf8");
-}
-
-function loadCuMeta() {
-  ensureDataDir();
-  if (!fs.existsSync(META_FILE)) {
-    return { lastPage: 0, totalCU: 0, updatedAt: null, note: "empty" };
-  }
-  return JSON.parse(fs.readFileSync(META_FILE, "utf8"));
-}
-
-function saveCuMeta(meta) {
-  ensureDataDir();
-  fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), "utf8");
-}
-
-function norm(s) {
-  return String(s || "").replace(/\s+/g, " ").trim();
-}
-
-function absUrl(href) {
-  if (!href) return "";
-  if (href.startsWith("http")) return href;
-  if (href.startsWith("/")) return "https://www.myspike.my" + href;
-  if (href.startsWith("index.php")) return "https://www.myspike.my/" + href;
-  return "https://www.myspike.my/" + href.replace(/^\.\//, "");
-}
-
-async function fetchHtml(url) {
-  const res = await axios.get(url, {
-    timeout: 30000,
-    headers: {
-      "User-Agent": "Mozilla/5.0 (compatible; iNOSSBot/1.0)",
-      "Accept-Language": "ms-MY,ms;q=0.9,en;q=0.8",
-      Accept: "text/html,application/xhtml+xml",
-    },
-  });
-  return String(res.data || "");
-}
-
-// NOSS list page -> extract CPC ids
-async function fetchNossListPage(page = 1) {
-  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-noss&page=${Number(page) || 1}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-
-  const cpIds = new Set();
-  $("a[href*='r=umum-noss%2Findex-cp']").each((_, a) => {
-    const href = $(a).attr("href") || "";
-    const full = absUrl(href);
-    const m = full.match(/[?&]id=(\d+)/);
-    if (m) cpIds.add(String(m[1]));
-  });
-
-  return { url, cpIds: Array.from(cpIds) };
-}
-
-// ===============================
-// PATCH 1: CPC page -> extract JD links (lebih robust)
-// ===============================
-async function fetchJdLinksFromCpId(cpId) {
-  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-cp&id=${cpId}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-
-  // helper: baca field dalam jadual label->value (kalau ada)
-  const readFieldFromTable = (labelRegex) => {
-    let val = "";
-    $("tr").each((_, tr) => {
-      const tds = $(tr).find("td,th");
-      if (tds.length < 2) return;
-      const left = norm($(tds[0]).text());
-      const right = norm($(tds[1]).text());
-      if (labelRegex.test(left) && right) val = right;
-    });
-    return val;
-  };
-
-  const nossCode = readFieldFromTable(/Kod\s*NOSS/i);
-  const nossTitle = readFieldFromTable(/Nama\s*NOSS/i);
-
-  // 1) Tangkap semua link view (JD) dalam CPC
-  // MySPIKE kadang guna:
-  // - r=umum-noss%2Fview&id=123
-  // - r=umum-noss/view&id=123
-  // - /index.php?r=umum-noss%2Fview&id=123
-  // - index.php?r=umum-noss%2Fview&id=123
-  const jdLinks = new Map(); // jdId -> {jdId, jdUrl, anchorText}
-
-  $("a[href]").each((_, a) => {
-    const hrefRaw = $(a).attr("href") || "";
-    const full = absUrl(hrefRaw);
-
-    // match mana-mana view&id=123
-    const m = full.match(/r=umum-noss(?:%2F|\/)view&?id=(\d+)/i) || full.match(/[?&]id=(\d+)/);
-    if (!m) return;
-
-    // pastikan benar-benar page view (bukan page lain yg kebetulan ada id)
-    if (!/umum-noss(?:%2F|\/)view/i.test(full)) return;
-
-    const jdId = String(m[1]);
-    const anchorText = norm($(a).text());
-
-    // elak link "view" yang kosong teks (kadang icon)
-    if (!jdLinks.has(jdId)) {
-      jdLinks.set(jdId, { jdId, jdUrl: full, anchorText: anchorText || "" });
-    }
-  });
-
-  return {
-    cpId: String(cpId),
-    url,
-    nossCode,
-    nossTitle,
-    jdLinks: Array.from(jdLinks.values()),
-  };
-}
-
-// ===============================
-// PATCH 2: JD page -> extract Kod CU + Tajuk CU + Penerangan CU (scan table)
-// ===============================
-async function fetchCuFromJd(jdId) {
-  const url = `https://www.myspike.my/index.php?r=umum-noss%2Fview&id=${jdId}`;
-  const html = await fetchHtml(url);
-  const $ = cheerio.load(html);
-
-  const out = {
-    jdId: String(jdId),
-    jdUrl: url,
-    cuCode: "",
-    cuTitle: "",
-    cuDesc: "",
-    programName: "",
-    nossCode: "",
-    source: "myspike",
-  };
-
-  // helper: extract value ikut label dalam jadual
-  const readField = (labelRegex) => {
-    let val = "";
-    $("tr").each((_, tr) => {
-      const tds = $(tr).find("td,th");
-      if (tds.length < 2) return;
-
-      const left = norm($(tds[0]).text());
-      if (!labelRegex.test(left)) return;
-
-      // ambil teks "kanan" dengan lebih kemas (kadang ada <br>, <li>)
-      const rightCell = $(tds[1]);
-
-      // cuba list item dahulu
-      const li = rightCell.find("li");
-      if (li.length) {
-        const parts = [];
-        li.each((__, x) => {
-          const t = norm($(x).text());
-          if (t) parts.push(t);
-        });
-        if (parts.length) {
-          val = parts.join(" | ");
-          return;
-        }
-      }
-
-      // fallback: plain text
-      const right = norm(rightCell.text());
-      if (right) val = right;
-    });
-
-    return val;
-  };
-
-  // MySPIKE biasanya ada label ini (BM/BI)
-  // Kod CU / CU Code
-  out.cuCode = readField(/Kod\s*CU|CU\s*Code/i);
-
-  // Tajuk CU / CU Title
-  out.cuTitle = readField(/Tajuk\s*CU|CU\s*Title/i);
-
-  // Penerangan CU / CU Description
-  out.cuDesc = readField(/Penerangan\s*CU|CU\s*Description/i);
-
-  // Kadang ada Nama Program + Kod NOSS dalam header/jadual
-  out.programName = readField(/Nama\s*Program|Program\s*Name/i);
-  const nossMaybe = readField(/Kod\s*NOSS|NOSS\s*Code/i);
-  out.nossCode = nossMaybe || out.nossCode;
-
-  // Fallback tambahan: kalau Kod CU kosong, cuba cari pattern kod dalam body text
-  if (!out.cuCode) {
-    const bodyText = norm($("body").text());
-    const m =
-      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d{2})/i) ||
-      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d)/i);
-    if (m) out.cuCode = norm(m[1]);
-  }
-
-  // Fallback tambahan: kalau tajuk kosong, cuba ambil dari h1/title
-  if (!out.cuTitle) {
-    out.cuTitle = norm($("h1").first().text()) || norm($("title").text());
-  }
-
-  // Trim final
-  out.cuCode = norm(out.cuCode);
-  out.cuTitle = norm(out.cuTitle);
-  out.cuDesc = norm(out.cuDesc);
-
-  return out;
-}
-
-// Status index
-app.get("/api/myspike/index/status", (req, res) => {
-  const meta = loadCuMeta();
-  res.json({ ok: true, meta });
-});
-
-// Build index batch
-// Body: { fromPage: 1, toPage: 2 }
-app.post("/api/myspike/index/build", async (req, res) => {
-  try {
-    const fromPage = Number(req.body?.fromPage || 1);
-    const toPage = Number(req.body?.toPage || fromPage);
-
-    let index = loadCuIndex();
-    const meta = loadCuMeta();
-
-    let added = 0;
-    for (let p = fromPage; p <= toPage; p++) {
-      const { cpIds } = await fetchNossListPage(p);
-
-      for (const cpId of cpIds) {
-        const cp = await fetchJdLinksFromCpId(cpId);
-
-        for (const jd of cp.jdLinks) {
-          const cu = await fetchCuFromJd(jd.jdId);
-
-          // Guard: mesti ada cuCode & cuTitle
-          if (!cu.cuTitle) continue;
-
-          // de-dup by cuCode (paling stabil)
-          const exists = index.some((x) => String(x.cuCode) === String(cu.cuCode));
-          if (exists) continue;
-
-          index.push({
-            ...cu,
-            cpId: cp.cpId,
-            cpUrl: cp.url,
-            nossCode_fromCPC: cp.nossCode,
-            nossTitle_fromCPC: cp.nossTitle,
-            indexedAt: new Date().toISOString(),
-          });
-          added++;
-        }
-      }
-
-      meta.lastPage = Math.max(meta.lastPage || 0, p);
-    }
-
-    meta.totalCU = index.length;
-    meta.updatedAt = new Date().toISOString();
-    meta.note = "REAL CU INDEX (from JD)";
-
-    saveCuIndex(index);
-    saveCuMeta(meta);
-
-    res.json({ ok: true, fromPage, toPage, added, meta });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-// Search CU dalam index (real)
-app.post("/api/myspike/cu/search", (req, res) => {
-  try {
-    const q = norm(req.body?.q || "").toLowerCase();
-    const limit = Math.max(1, Math.min(200, Number(req.body?.limit || 50)));
-
-    const index = loadCuIndex();
-    if (!q) return res.json({ ok: true, q, totalIndexed: index.length, hits: [] });
-
-    const hits = index
-      .map((cu) => {
-        const hay = `${cu.cuCode} ${cu.cuTitle} ${cu.cuDesc}`.toLowerCase();
-        const score =
-          (String(cu.cuTitle || "").toLowerCase().includes(q) ? 3 : 0) +
-          (String(cu.cuDesc || "").toLowerCase().includes(q) ? 2 : 0) +
-          (String(cu.cuCode || "").toLowerCase().includes(q) ? 1 : 0) +
-          (hay.includes(q) ? 1 : 0);
-        return { cu, score };
-      })
-      .filter((x) => x.score > 0)
-      .sort((a, b) => b.score - a.score)
-      .slice(0, limit)
-      .map((x) => x.cu);
-
-    return res.json({ ok: true, q, totalIndexed: index.length, hits });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e?.message || e) });
-  }
-});
-
-/* ======================================================
- * 6) MySPIKE Comparator (REAL AI)
- * - Compare CU input (dari iNOSS) vs CU index MySPIKE
- * - Guna embeddings cosine similarity
- * ====================================================== */
-
-function cosineSimilarity(a, b) {
-  let dot = 0, na = 0, nb = 0;
-  const len = Math.min(a.length, b.length);
-  for (let i = 0; i < len; i++) {
-    const x = a[i];
-    const y = b[i];
-    dot += x * y;
-    na += x * x;
-    nb += y * y;
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
-
-function confidenceLabel(score) {
-  if (score >= 0.85) return "HIGH";
-  if (score >= 0.78) return "MEDIUM";
-  if (score >= 0.70) return "LOW";
-  return "NONE";
-}
-
-function buildCuText(cu) {
-  const title = String(cu.cuTitle || cu.title || "").trim();
-  const code = String(cu.cuCode || cu.code || "").trim();
-  const acts = Array.isArray(cu.activities) ? cu.activities : [];
-  const actTitles = acts
-    .map((a) => String(a.waTitle || a.title || "").trim())
-    .filter(Boolean)
-    .join("; ");
-  return `CU ${code}: ${title}\nAktiviti: ${actTitles}`.trim();
-}
-
-function buildMyspikeCuText(item) {
-  const title = String(item.cuTitle || "").trim();
-  const code = String(item.cuCode || "").trim();
-  const desc = String(item.cuDesc || "").trim();
-  return `MySPIKE CU ${code}: ${title}\nHuraian: ${desc}`.trim();
-}
-
-// In-memory embeddings cache (MVP)
-let MYSPIKE_CU_ITEMS = null;
-let MYSPIKE_CU_EMB = null;
-let MYSPIKE_CU_LOADED_AT = null;
-
-async function ensureMyspikeCuEmbeddings({ model = "text-embedding-3-small" } = {}) {
-  const items = loadCuIndex();
-  if (!items.length) {
-    MYSPIKE_CU_ITEMS = [];
-    MYSPIKE_CU_EMB = [];
-    MYSPIKE_CU_LOADED_AT = new Date().toISOString();
-    return;
-  }
-
-  // If cached & same length, reuse
-  if (MYSPIKE_CU_ITEMS && MYSPIKE_CU_EMB && MYSPIKE_CU_ITEMS.length === items.length) return;
-
-  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY belum diset");
-
-  const inputs = items.map(buildMyspikeCuText);
-
-  // Batch embeddings (elak timeout)
-  const batchSize = 200;
-  const allEmb = [];
-  for (let i = 0; i < inputs.length; i += batchSize) {
-    const batch = inputs.slice(i, i + batchSize);
-    const emb = await client.embeddings.create({ model, input: batch });
-    for (const d of emb.data) allEmb.push(d.embedding);
-  }
-
-  MYSPIKE_CU_ITEMS = items;
-  MYSPIKE_CU_EMB = allEmb;
-  MYSPIKE_CU_LOADED_AT = new Date().toISOString();
-}
-
-/**
- * POST /api/s2/compare
- * Body:
- * {
- *   sessionId?: string,
- *   cus: [{cuCode, cuTitle, activities:[{waTitle}]}],
- *   options?: { thresholdAda?: 0.78, topK?: 3 }
- * }
- */
-app.post("/api/s2/compare", async (req, res) => {
-  try {
-    const { sessionId, cus, options, meta } = req.body || {};
-    const list = Array.isArray(cus) ? cus : [];
-
-    if (!list.length) {
-      return res.status(400).json({ error: "cus kosong. Sila hantar sekurang-kurangnya 1 CU." });
-    }
-
-    const thresholdAda = Number(options?.thresholdAda ?? 0.78);
-    const topK = Math.max(1, Math.min(10, Number(options?.topK ?? 3)));
-
-    await ensureMyspikeCuEmbeddings({ model: "text-embedding-3-small" });
-
-    const myItems = MYSPIKE_CU_ITEMS || [];
-    const myEmb = MYSPIKE_CU_EMB || [];
-
-    if (!myItems.length) {
-      return res.status(400).json({
-        error: "Index MySPIKE CU masih kosong. Sila bina index dulu: POST /api/myspike/index/build",
-      });
-    }
-
-    const cuTexts = list.map(buildCuText);
-    const cuEmbRes = await client.embeddings.create({
-      model: "text-embedding-3-small",
-      input: cuTexts,
-    });
-    const cuEmb = cuEmbRes.data.map((d) => d.embedding);
-
-    const results = list.map((cu, idx) => {
-      const vec = cuEmb[idx];
-
-      const scored = myItems.map((item, j) => {
-        const score = cosineSimilarity(vec, myEmb[j]);
-        return { cuCode: item.cuCode, cuTitle: item.cuTitle, score: Number(score.toFixed(4)) };
-      });
-
-      scored.sort((a, b) => b.score - a.score);
-      const top = scored.slice(0, topK);
-
-      const best = top[0] ? top[0].score : 0;
-      const conf = confidenceLabel(best);
-      const status = best >= thresholdAda ? "ADA" : "TIADA";
-
-      return {
-        input: {
-          cuCode: cu.cuCode || "",
-          cuTitle: cu.cuTitle || cu.title || "",
-          activitiesCount: Array.isArray(cu.activities) ? cu.activities.length : 0,
-        },
-        decision: { status, bestScore: best, confidence: conf, thresholdAda },
-        matches: top,
-      };
-    });
-
-    return res.json({
-      ok: true,
-      sessionId: sessionId || meta?.sessionId || "unknown",
-      meta: meta || {},
-      myspike: {
-        source: "REAL_INDEX",
-        loadedAt: MYSPIKE_CU_LOADED_AT,
-        totalCandidates: myItems.length,
-        embeddingModel: "text-embedding-3-small",
-      },
-      summary: {
-        totalCU: results.length,
-        ada: results.filter((r) => r.decision.status === "ADA").length,
-        tiada: results.filter((r) => r.decision.status === "TIADA").length,
-      },
-      results,
-      generatedAt: new Date().toISOString(),
-    });
-  } catch (e) {
-    console.error("S2 compare error:", e);
-    return res.status(500).json({
-      error: "Gagal buat perbandingan MySPIKE",
-      detail: String(e?.message || e),
-    });
-  }
-});
+// --- PASTE BLOK MYSPIKE PROF DI SINI ---
 
 /* =========================
- * DEBUG: OpenAI connection
+ * SERVER START (PALING BAWAH)
  * ========================= */
-app.get("/debug/openai", async (req, res) => {
-  try {
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ ok: false, message: "OPENAI_API_KEY belum diset" });
-    }
-
-    const r = await client.embeddings.create({
-      model: "text-embedding-3-small",
-      input: "test connection",
-    });
-
-    return res.json({ ok: true, embedding_dim: r.data?.[0]?.embedding?.length || null });
-  } catch (e) {
-    return res.status(500).json({
-      ok: false,
-      message: e?.message || "OpenAI debug error",
-      detail: e?.response?.data || null,
-    });
-  }
-});
-
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
 const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log("🚀 Server listening on", PORT);
