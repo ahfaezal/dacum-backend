@@ -309,6 +309,100 @@ app.post("/api/session/config/:sessionId", (req, res) => {
   });
 });
 
+import React, { useEffect, useState } from "react";
+
+const API_BASE =
+  import.meta.env.VITE_API_BASE || "https://dacum-backend.onrender.com";
+
+export default function CpcPage() {
+  const url = new URL(window.location.href);
+  const sessionId = url.searchParams.get("session") || "Masjid";
+
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function load() {
+    setLoading(true);
+    setErr("");
+    try {
+      const r = await fetch(`${API_BASE}/api/cpc/${encodeURIComponent(sessionId)}`);
+      const j = await r.json();
+      if (!r.ok) throw new Error(j?.error || "Gagal load CPC");
+      setData(j);
+    } catch (e) {
+      setErr(String(e?.message || e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { load(); }, [sessionId]);
+
+  if (loading) return <div style={{ padding: 16 }}>Loading CPC…</div>;
+  if (err) return <div style={{ padding: 16, color: "crimson" }}>{err}</div>;
+  if (!data) return <div style={{ padding: 16 }}>Tiada data.</div>;
+
+  const teras = data.teras?.[0] || {};
+  const units = teras.units || [];
+
+  return (
+    <div style={{ padding: 16, fontFamily: "Georgia, serif" }}>
+      <h2 style={{ margin: "0 0 12px" }}>Carta Profil Kompetensi (CPC)</h2>
+
+      <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 12 }}>
+        <div><b>Session:</b> {data.sessionId}</div>
+        <div><b>Bahasa:</b> {data.lang}</div>
+        <div><b>Generated:</b> {data.generatedAt}</div>
+      </div>
+
+      {/* Layout CPC ringkas */}
+      <div style={{ display: "grid", gridTemplateColumns: "220px 1fr", gap: 12 }}>
+        {/* TERAS */}
+        <div style={{ border: "1px solid #333", padding: 12, background: "#f2c94c" }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>TERAS</div>
+          <div style={{ fontWeight: 700 }}>{teras.terasTitle || "Teras"}</div>
+        </div>
+
+        {/* UNIT + WA */}
+        <div style={{ display: "grid", gap: 12 }}>
+          {units.map((u) => (
+            <div key={u.cuCode} style={{ border: "1px solid #333" }}>
+              <div style={{ background: "#8bd17c", padding: 10, fontWeight: 700 }}>
+                {u.cuCode}: {u.cuTitle}
+              </div>
+
+              <div
+                style={{
+                  display: "grid",
+                  gridTemplateColumns: "repeat(4, minmax(180px, 1fr))",
+                  gap: 10,
+                  padding: 10,
+                }}
+              >
+                {(u.wa || []).map((w) => (
+                  <div
+                    key={w.waCode}
+                    style={{
+                      border: "1px solid #333",
+                      background: "#d6eefc",
+                      padding: 10,
+                      minHeight: 70,
+                    }}
+                  >
+                    <div style={{ fontWeight: 700 }}>{w.waCode}</div>
+                    <div>{w.waTitle}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 app.post("/api/session/lock/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const s = ensureSession(sid);
