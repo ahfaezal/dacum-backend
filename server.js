@@ -422,6 +422,60 @@ app.post("/api/cluster/preview", async (req, res) => {
   }
 });
 
+/**
+ * GET /api/cpc/:sessionId
+ * Hasilkan CPC (TERAS → CU → WA) daripada data session
+ */
+app.get("/api/cpc/:sessionId", (req, res) => {
+  const sessionId = String(req.params.sessionId || "").trim();
+  if (!sessionId) {
+    return res.status(400).json({ error: "sessionId diperlukan" });
+  }
+
+  const s = ensureSession(sessionId);
+  if (!s) {
+    return res.status(404).json({ error: "Session tidak ditemui" });
+  }
+
+  const cards = getSessionCards(sessionId);
+
+  // bina CU → WA
+  const cuMap = {};
+  cards.forEach((c) => {
+    if (!c.cuCode || !c.waCode) return;
+
+    if (!cuMap[c.cuCode]) {
+      cuMap[c.cuCode] = {
+        cuCode: c.cuCode,
+        cuTitle: c.cuTitle || "",
+        wa: [],
+      };
+    }
+
+    cuMap[c.cuCode].wa.push({
+      waCode: c.waCode,
+      waTitle: c.waTitle || c.title || "",
+    });
+  });
+
+  const units = Object.values(cuMap);
+
+  return res.json({
+    sessionId,
+    lang: String(s.lang || "MS").toUpperCase(),
+    generatedAt: new Date().toISOString(),
+
+    // struktur CPC
+    teras: [
+      {
+        terasCode: "T01",
+        terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
+      },
+    ],
+    units,
+  });
+});
+
 // REAL cluster RUN (OpenAI) — ikut bahasa session (MS/EN) + auto-lock
 app.post("/api/cluster/run", async (req, res) => {
   try {
