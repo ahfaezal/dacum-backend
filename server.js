@@ -439,26 +439,55 @@ app.get("/api/cpc/:sessionId", (req, res) => {
 
   const cards = getSessionCards(sessionId);
 
-  // bina CU → WA
-  const cuMap = {};
-  cards.forEach((c) => {
-    if (!c.cuCode || !c.waCode) return;
+// bina CU → WA (auto-detect field)
+const cuMap = {};
+cards.forEach((c, idx) => {
+  const cuCode =
+    c.cuCode ||
+    c.cu_id ||
+    c.cuId ||
+    c.cu ||
+    (c.cuTitle ? `CU${idx + 1}` : "");
 
-    if (!cuMap[c.cuCode]) {
-      cuMap[c.cuCode] = {
-        cuCode: c.cuCode,
-        cuTitle: c.cuTitle || "",
-        wa: [],
-      };
-    }
+  const waCode =
+    c.waCode ||
+    c.wa_id ||
+    c.waId ||
+    c.wa ||
+    (c.waTitle ? `WA${idx + 1}` : "");
 
-    cuMap[c.cuCode].wa.push({
-      waCode: c.waCode,
-      waTitle: c.waTitle || c.title || "",
-    });
-  });
+  const cuTitle =
+    c.cuTitle ||
+    c.cu_title ||
+    c.cuName ||
+    c.unitTitle ||
+    c.cu ||
+    "";
 
-  const units = Object.values(cuMap);
+  const waTitle =
+    c.waTitle ||
+    c.wa_title ||
+    c.waName ||
+    c.activityTitle ||
+    c.title ||
+    c.wa ||
+    "";
+
+  if (!cuCode || !waCode) return;
+
+  if (!cuMap[cuCode]) {
+    cuMap[cuCode] = { cuCode, cuTitle, wa: [] };
+  }
+
+  const exists = cuMap[cuCode].wa.some(
+    (w) =>
+      String(w.waCode) === String(waCode) &&
+      String(w.waTitle) === String(waTitle)
+  );
+  if (!exists) cuMap[cuCode].wa.push({ waCode, waTitle });
+});
+
+const units = Object.values(cuMap);
 
   return res.json({
     sessionId,
