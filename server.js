@@ -213,67 +213,6 @@ app.get("/api/s2/cards", (req, res) => {
 });
 
 /* ======================================================
- * 2) iNOSS – CU Naming Rules (Rule-Based)
- * ====================================================== */
-const CU_OBJECT_MAP = [
-  { keywords: ["dokumen", "dokumentasi", "fail", "rekod", "simpan"], verb: "Urus", object: "Dokumentasi Pengimarahan Masjid" },
-  { keywords: ["solat", "imam", "iqamah", "azan", "fardu", "jumaat"], verb: "Pimpin", object: "Solat Berjemaah" },
-  { keywords: ["wirid", "doa", "zikir"], verb: "Pimpin", object: "Wirid Jemaah" },
-  { keywords: ["minit", "mesyuarat", "surat", "rasmi"], verb: "Sediakan", object: "Minit Mesyuarat Masjid" },
-  { keywords: ["baucar", "kewangan", "resit", "bil", "bayaran"], verb: "Sediakan", object: "Laporan Kewangan Masjid" },
-  { keywords: ["penceramah", "jemput", "undangan"], verb: "Selaras", object: "Penceramah Program Masjid" },
-];
-
-function suggestCUName(activities = []) {
-  const text = String(Array.isArray(activities) ? activities.join(" ") : activities || "")
-    .toLowerCase()
-    .replace(/\s+/g, " ")
-    .trim();
-
-  if (!text) {
-    return { title: "Urus Aktiviti Pengimarahan Masjid", verb: "Urus", object: "Aktiviti Pengimarahan Masjid", confidence: 0.2, reasons: ["fallback:no-activities"] };
-  }
-
-  let best = null;
-  let bestScore = 0;
-  let bestReasons = [];
-
-  for (const map of CU_OBJECT_MAP) {
-    const keywords = Array.isArray(map?.keywords) ? map.keywords : [];
-    let score = 0;
-    const reasons = [];
-
-    for (const kw of keywords) {
-      const k = String(kw || "").toLowerCase().trim();
-      if (!k) continue;
-      if (text.includes(k)) {
-        score += 1;
-        reasons.push(k);
-      }
-    }
-
-    if (score > bestScore) {
-      bestScore = score;
-      best = map;
-      bestReasons = reasons;
-    }
-  }
-
-  if (!best) {
-    return { title: "Urus Aktiviti Pengimarahan Masjid", verb: "Urus", object: "Aktiviti Pengimarahan Masjid", confidence: 0.3, reasons: ["fallback:no-match"] };
-  }
-
-  const verb = String(best.verb || "Urus").trim();
-  let object = String(best.object || "Aktiviti Pengimarahan Masjid").trim();
-  object = object.replace(/\bdan\b/gi, "").replace(/\s+/g, " ").trim();
-
-  const title = `${verb} ${object}`.trim();
-  const confidence = Math.max(0.35, Math.min(0.95, bestScore / 5));
-
-  return { title, verb, object, confidence, reasons: bestReasons };
-}
-
-/* ======================================================
  * 3) AI CLUSTER (REAL)
  * ====================================================== */
 
@@ -440,33 +379,21 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
     const unassigned = Array.isArray(parsed.unassigned) ? parsed.unassigned : [];
 
     // ✅ Suggested CU (rule-based) — betul susunan (define dulu, baru result)
-    const clustersWithSuggestedCU = clusters.map((cl) => {
-      const cardIds = Array.isArray(cl.cardIds) ? cl.cardIds : [];
-      const activities = cardIds
-        .map((cid) => {
-          const found = items.find((it) => it.id === cid);
-          return found ? getCardText(found) : "";
-        })
-        .filter(Boolean);
+      const result = {
+        sessionId: sid,
+        generatedAt: new Date().toISOString(),
+        clusters,          // <-- guna AI cluster terus
+        unassigned,
+      };
+      clusterStore[sid] = result;
+      return res.json(result);
 
-      const suggestedCU = suggestCUName(activities);
-
-      return { ...cl, suggestedCU };
-    });
-
-    const result = {
-      sessionId: sid,
-      generatedAt: new Date().toISOString(),
-      clusters: clustersWithSuggestedCU,
-      unassigned,
-    };
-
-    clusterStore[sid] = result;
-    return res.json(result);
-  } catch (e) {
-    return res.status(500).json({ error: e?.message || "AI cluster run error" });
-  }
-});
+          clusterStore[sid] = result;
+          return res.json(result);
+        } catch (e) {
+          return res.status(500).json({ error: e?.message || "AI cluster run error" });
+        }
+      });
 
 /* ======================================================
  * 4) SISTEM 2 Bridge (Seed WA)
