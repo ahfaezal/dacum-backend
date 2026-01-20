@@ -68,6 +68,11 @@ function ensureSession(sessionId) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       cards: [],
+
+      // ✅ Bahasa NOSS (ditetapkan fasilitator)
+      lang: "MS",          // "MS" | "EN"
+      langLocked: false,   // lock bila Agreed
+      lockedAt: null,
     };
   }
   if (!Array.isArray(sessions[sid].cards)) sessions[sid].cards = [];
@@ -249,6 +254,23 @@ app.get("/api/session/summary/:sessionId", (req, res) => {
   return res.json({ ok: true, sessionId: sid, total, assigned, unassigned, updatedAt: new Date().toISOString() });
 });
 
+app.get("/api/session/config/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const s = ensureSession(sid);
+
+  if (!s) {
+    return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+  }
+
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    lang: String(s.lang || "MS").toUpperCase(),   // MS | EN
+    langLocked: !!s.langLocked,
+    lockedAt: s.lockedAt || null,
+  });
+});
+
 // Debug: lihat cus dalam session (hasil Apply AI)
 app.get("/api/session/cus/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
@@ -258,6 +280,50 @@ app.get("/api/session/cus/:sessionId", (req, res) => {
     sessionId: sid,
     cus: s?.cus || [],
     appliedAt: s?.appliedAt || null,
+  });
+});
+
+app.post("/api/session/config/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const s = ensureSession(sid);
+  if (!s) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+  if (s.langLocked) {
+    return res.status(400).json({ ok: false, error: "Bahasa sudah dikunci selepas Agreed." });
+  }
+
+  const lang = String(req.body?.lang || "").toUpperCase().trim();
+  if (!["MS", "EN"].includes(lang)) {
+    return res.status(400).json({ ok: false, error: "lang mesti 'MS' atau 'EN'." });
+  }
+
+  s.lang = lang;
+  s.updatedAt = new Date().toISOString();
+
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    lang: s.lang,
+    langLocked: !!s.langLocked,
+    lockedAt: s.lockedAt || null,
+  });
+});
+
+app.post("/api/session/lock/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const s = ensureSession(sid);
+  if (!s) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+  s.langLocked = true;
+  s.lockedAt = new Date().toISOString();
+  s.updatedAt = s.lockedAt;
+
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    lang: String(s.lang || "MS").toUpperCase(),
+    langLocked: true,
+    lockedAt: s.lockedAt,
   });
 });
 
