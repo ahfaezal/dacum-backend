@@ -249,6 +249,18 @@ app.get("/api/session/summary/:sessionId", (req, res) => {
   return res.json({ ok: true, sessionId: sid, total, assigned, unassigned, updatedAt: new Date().toISOString() });
 });
 
+// Debug: lihat cus dalam session (hasil Apply AI)
+app.get("/api/session/cus/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const s = ensureSession(sid);
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    cus: s?.cus || [],
+    appliedAt: s?.appliedAt || null,
+  });
+});
+
 // Preview clustering (lite) – tanpa OpenAI
 app.post("/api/cluster/preview", async (req, res) => {
   try {
@@ -423,6 +435,78 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
     return res.json(result);
   } catch (e) {
     return res.status(500).json({ error: e?.message || "AI cluster run error" });
+  }
+});
+
+/**
+ * Apply AI Cluster result -> simpan sebagai CU/WA dalam session (cus[])
+ * POST /api/cluster/apply
+ * Body: { sessionId: "..." }
+ */
+app.post("/api/cluster/apply", (req, res) => {
+  try {
+    const sid = String(req.body?.sessionId || "").trim();
+    if (!sid) return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
+
+    const last = clusterStore[sid];
+    if (!last || !Array.isArray(last.clusters) || !last.clusters.length) {
+      return res.status(400).json({
+        ok: false,
+        error: "Tiada cluster result. Sila run /api/cluster/run dahulu.",
+      });
+    }
+
+    const sess = ensureSession(sid);
+    const cards = getSessionCards(sid);
+    const byId = new Map(cards.map((c) => [String(c.id), c]));
+
+    // bina CU/WA dari clusters
+    const cus = last.clusters.map((cl, i) => {
+      const cuId = `CU-${String(i + 1).padStart(2, "0")}`;
+      const cuTitle = String(cl?.title || `CU ${i + 1}`).trim();
+
+      const cardIds = Array.isArray(cl?.cardIds) ? cl.cardIds : [];
+      const activities = cardIds.map((id, j) => {
+        const card = byId.get(String(id));
+        const waTitle = (card && getCardText(card)) || `Aktiviti ${j + 1}`;
+        return {
+          waId: `WA-${String(j + 1).padStart(2, "0")}`,
+          waTitle,
+          cardIds: [id],
+        };
+      });
+
+      return { cuId, cuTitle, activities };
+    });
+
+    // simpan dalam session supaya frontend boleh guna (MySPIKE compare, export, dll)
+    sess.cus = cus;
+    sess.appliedAt = new Date().toISOString();
+    sess.updatedAt = new Date().toISOString();
+
+    // Optional: tandakan cards dengan cuTitle (supaya summary/assigned boleh reflect)
+    // Ini membantu kalau UI baca assigned daripada card.cu / card.cuTitle
+    const cuByCardId = new Map();
+    cus.forEach((cu) => {
+      cu.activities.forEach((wa) => {
+        (wa.cardIds || []).forEach((cid) => cuByCardId.set(String(cid), cu.cuTitle));
+      });
+    });
+
+    cards.forEach((c) => {
+      const t = cuByCardId.get(String(c.id));
+      if (t) c.cuTitle = t; // minimal tagging
+    });
+
+    return res.json({
+      ok: true,
+      sessionId: sid,
+      cusCount: cus.length,
+      appliedAt: sess.appliedAt,
+      sampleCu: cus[0] || null,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 
