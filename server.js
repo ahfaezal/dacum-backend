@@ -315,6 +315,19 @@ app.post("/api/cluster/preview", async (req, res) => {
   }
 });
 
+const app = express();
+app.use(cors({ origin: "*" }));
+app.use(express.json({ limit: "2mb" }));
+
+// HEALTH
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "dacum-backend",
+    time: new Date().toISOString(),
+  });
+});
+
 // REAL cluster RUN (OpenAI)
 app.post("/api/cluster/run", async (req, res) => {
   try {
