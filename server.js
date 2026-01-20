@@ -477,8 +477,6 @@ const units = Object.values(cuMap).map((u, i) => ({
   })),
 }));
 
-const units = Object.values(cuMap);
-
   return res.json({
     sessionId,
     lang: String(s.lang || "MS").toUpperCase(),
