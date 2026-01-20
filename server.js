@@ -36,12 +36,6 @@ app.get("/health", (req, res) => {
   });
 });
 
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
-
-const PORT = process.env.PORT || 10000;
-server.listen(PORT, () => console.log("Listening on", PORT));
-
 /* =========================
  * Root
  * ========================= */
@@ -401,6 +395,14 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
           return res.status(500).json({ error: e?.message || "AI cluster run error" });
         }
       });
+
+const server = http.createServer(app);
+const io = new Server(server, { cors: { origin: "*" } });
+
+const PORT = process.env.PORT || 10000;
+server.listen(PORT, () => {
+  console.log("🚀 Server listening on", PORT);
+});
 
 /* ======================================================
  * 4) SISTEM 2 Bridge (Seed WA)
