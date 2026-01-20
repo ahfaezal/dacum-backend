@@ -1,5 +1,16 @@
 /**
- * server.js — iNOSS Backend (CLEAN)
+ * server.js — iNOSS Backend (FINAL CLEAN)
+ * Fokus:
+ * 1) DACUM Cards + LiveBoard (Socket.IO + REST)
+ * 2) AI Clustering (REAL) -> /api/cluster/run + /api/cluster/result/:sessionId
+ * 3) MySPIKE REAL CU Index (crawl NOSS->CPC->JD)
+ * 4) MySPIKE AI Comparator (Embeddings) guna index REAL
+ *
+ * Prinsip:
+ * - sessions berbentuk OBJECT: { sessionId, cards: [] }
+ * - Semua endpoint cards guna helper getSessionCards()
+ * - server+io dideclare awal (sebelum io digunakan)
+ * - server.listen di bawah sekali (Render friendly)
  */
 
 const express = require("express");
@@ -214,9 +225,10 @@ app.get("/api/s2/cards", (req, res) => {
 });
 
 /* ======================================================
- * 3) AI CLUSTER (REAL)
+ * 2) AI CLUSTER (REAL)
  * ====================================================== */
 
+// Get last result
 app.get("/api/cluster/result/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const data = clusterStore[sid];
@@ -224,6 +236,7 @@ app.get("/api/cluster/result/:sessionId", (req, res) => {
   return res.json(data);
 });
 
+// Session summary
 app.get("/api/session/summary/:sessionId", (req, res) => {
   const sid = String(req.params.sessionId || "").trim();
   const items = getSessionCards(sid);
@@ -236,7 +249,7 @@ app.get("/api/session/summary/:sessionId", (req, res) => {
   return res.json({ ok: true, sessionId: sid, total, assigned, unassigned, updatedAt: new Date().toISOString() });
 });
 
-// Preview (lite)
+// Preview clustering (lite) – tanpa OpenAI
 app.post("/api/cluster/preview", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
@@ -247,16 +260,34 @@ app.post("/api/cluster/preview", async (req, res) => {
 
     const cards = getSessionCards(sessionId);
     if (!cards.length) {
-      return res.json({ ok: true, sessionId, totalCards: 0, clusters: [], unassigned: [], meta: { note: "Tiada card dalam session." } });
+      return res.json({
+        ok: true,
+        sessionId,
+        totalCards: 0,
+        clusters: [],
+        unassigned: [],
+        meta: { note: "Tiada card dalam session." },
+      });
     }
 
     const items = cards.map((c) => ({ id: c.id, text: getCardText(c) })).filter((x) => x.text);
     if (!items.length) {
-      return res.json({ ok: true, sessionId, totalCards: cards.length, clusters: [], unassigned: cards.map((c) => c.id), meta: { note: "Semua card kosong." } });
+      return res.json({
+        ok: true,
+        sessionId,
+        totalCards: cards.length,
+        clusters: [],
+        unassigned: cards.map((c) => c.id),
+        meta: { note: "Semua card kosong." },
+      });
     }
 
     function tokenize(t) {
-      return String(t).toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, " ").split(/\s+/).filter(Boolean);
+      return String(t)
+        .toLowerCase()
+        .replace(/[^\p{L}\p{N}\s]/gu, " ")
+        .split(/\s+/)
+        .filter(Boolean);
     }
     function jaccard(a, b) {
       const A = new Set(a);
@@ -362,7 +393,11 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
 
     const raw = out?.choices?.[0]?.message?.content || "{}";
     let parsed;
-    try { parsed = JSON.parse(raw); } catch { parsed = null; }
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
 
     if (!parsed || !Array.isArray(parsed.clusters)) {
       return res.status(500).json({ error: "Output AI tidak sah", raw });
@@ -392,7 +427,7 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
 });
 
 /* ======================================================
- * 4) SISTEM 2 Bridge (Seed WA)
+ * 3) SISTEM 2 Bridge (Seed WA)
  * ====================================================== */
 app.post("/api/s2/seed-wa", (req, res) => {
   try {
@@ -423,14 +458,480 @@ app.post("/api/s2/seed-wa", (req, res) => {
 });
 
 /* ======================================================
- * 5) MySPIKE REAL CU INDEX
- * (kekal seperti code Prof)
+ * 4) MySPIKE REAL CU INDEX
+ * ====================================================== */
+const DATA_DIR = path.join(__dirname, "data");
+const INDEX_FILE = path.join(DATA_DIR, "myspike_cu_index.json");
+const META_FILE = path.join(DATA_DIR, "myspike_cu_index.meta.json");
+
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+function loadCuIndex() {
+  ensureDataDir();
+  if (!fs.existsSync(INDEX_FILE)) return [];
+  return JSON.parse(fs.readFileSync(INDEX_FILE, "utf8"));
+}
+
+function saveCuIndex(items) {
+  ensureDataDir();
+  fs.writeFileSync(INDEX_FILE, JSON.stringify(items, null, 2), "utf8");
+}
+
+function loadCuMeta() {
+  ensureDataDir();
+  if (!fs.existsSync(META_FILE)) {
+    return { lastPage: 0, totalCU: 0, updatedAt: null, note: "empty" };
+  }
+  return JSON.parse(fs.readFileSync(META_FILE, "utf8"));
+}
+
+function saveCuMeta(meta) {
+  ensureDataDir();
+  fs.writeFileSync(META_FILE, JSON.stringify(meta, null, 2), "utf8");
+}
+
+function norm(s) {
+  return String(s || "").replace(/\s+/g, " ").trim();
+}
+
+function absUrl(href) {
+  if (!href) return "";
+  if (href.startsWith("http")) return href;
+  if (href.startsWith("/")) return "https://www.myspike.my" + href;
+  if (href.startsWith("index.php")) return "https://www.myspike.my/" + href;
+  return "https://www.myspike.my/" + href.replace(/^\.\//, "");
+}
+
+async function fetchHtml(url) {
+  const res = await axios.get(url, {
+    timeout: 30000,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (compatible; iNOSSBot/1.0)",
+      "Accept-Language": "ms-MY,ms;q=0.9,en;q=0.8",
+      Accept: "text/html,application/xhtml+xml",
+    },
+  });
+  return String(res.data || "");
+}
+
+// NOSS list page -> extract CPC ids
+async function fetchNossListPage(page = 1) {
+  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-noss&page=${Number(page) || 1}`;
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+
+  const cpIds = new Set();
+  $("a[href*='r=umum-noss%2Findex-cp']").each((_, a) => {
+    const href = $(a).attr("href") || "";
+    const full = absUrl(href);
+    const m = full.match(/[?&]id=(\d+)/);
+    if (m) cpIds.add(String(m[1]));
+  });
+
+  return { url, cpIds: Array.from(cpIds) };
+}
+
+// CPC page -> extract JD links
+async function fetchJdLinksFromCpId(cpId) {
+  const url = `https://www.myspike.my/index.php?r=umum-noss%2Findex-cp&id=${cpId}`;
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+
+  const readFieldFromTable = (labelRegex) => {
+    let val = "";
+    $("tr").each((_, tr) => {
+      const tds = $(tr).find("td,th");
+      if (tds.length < 2) return;
+      const left = norm($(tds[0]).text());
+      const right = norm($(tds[1]).text());
+      if (labelRegex.test(left) && right) val = right;
+    });
+    return val;
+  };
+
+  const nossCode = readFieldFromTable(/Kod\s*NOSS/i);
+  const nossTitle = readFieldFromTable(/Nama\s*NOSS/i);
+
+  const jdLinks = new Map(); // jdId -> {jdId, jdUrl, anchorText}
+  $("a[href]").each((_, a) => {
+    const hrefRaw = $(a).attr("href") || "";
+    const full = absUrl(hrefRaw);
+
+    const m =
+      full.match(/r=umum-noss(?:%2F|\/)view&?id=(\d+)/i) ||
+      full.match(/[?&]id=(\d+)/);
+
+    if (!m) return;
+    if (!/umum-noss(?:%2F|\/)view/i.test(full)) return;
+
+    const jdId = String(m[1]);
+    const anchorText = norm($(a).text());
+    if (!jdLinks.has(jdId)) {
+      jdLinks.set(jdId, { jdId, jdUrl: full, anchorText: anchorText || "" });
+    }
+  });
+
+  return {
+    cpId: String(cpId),
+    url,
+    nossCode,
+    nossTitle,
+    jdLinks: Array.from(jdLinks.values()),
+  };
+}
+
+// JD page -> extract Kod CU + Tajuk CU + Penerangan CU
+async function fetchCuFromJd(jdId) {
+  const url = `https://www.myspike.my/index.php?r=umum-noss%2Fview&id=${jdId}`;
+  const html = await fetchHtml(url);
+  const $ = cheerio.load(html);
+
+  const out = {
+    jdId: String(jdId),
+    jdUrl: url,
+    cuCode: "",
+    cuTitle: "",
+    cuDesc: "",
+    programName: "",
+    nossCode: "",
+    source: "myspike",
+  };
+
+  const readField = (labelRegex) => {
+    let val = "";
+    $("tr").each((_, tr) => {
+      const tds = $(tr).find("td,th");
+      if (tds.length < 2) return;
+
+      const left = norm($(tds[0]).text());
+      if (!labelRegex.test(left)) return;
+
+      const rightCell = $(tds[1]);
+
+      const li = rightCell.find("li");
+      if (li.length) {
+        const parts = [];
+        li.each((__, x) => {
+          const t = norm($(x).text());
+          if (t) parts.push(t);
+        });
+        if (parts.length) {
+          val = parts.join(" | ");
+          return;
+        }
+      }
+
+      const right = norm(rightCell.text());
+      if (right) val = right;
+    });
+
+    return val;
+  };
+
+  out.cuCode = readField(/Kod\s*CU|CU\s*Code/i);
+  out.cuTitle = readField(/Tajuk\s*CU|CU\s*Title/i);
+  out.cuDesc = readField(/Penerangan\s*CU|CU\s*Description/i);
+
+  out.programName = readField(/Nama\s*Program|Program\s*Name/i);
+  const nossMaybe = readField(/Kod\s*NOSS|NOSS\s*Code/i);
+  out.nossCode = nossMaybe || out.nossCode;
+
+  if (!out.cuCode) {
+    const bodyText = norm($("body").text());
+    const m =
+      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d{2})/i) ||
+      bodyText.match(/([A-Z]{2,4}-\d{3,4}-\d:\d{4}-C\d)/i);
+    if (m) out.cuCode = norm(m[1]);
+  }
+
+  if (!out.cuTitle) {
+    out.cuTitle = norm($("h1").first().text()) || norm($("title").text());
+  }
+
+  out.cuCode = norm(out.cuCode);
+  out.cuTitle = norm(out.cuTitle);
+  out.cuDesc = norm(out.cuDesc);
+
+  return out;
+}
+
+// Status index
+app.get("/api/myspike/index/status", (req, res) => {
+  const meta = loadCuMeta();
+  res.json({ ok: true, meta });
+});
+
+// Build index batch
+app.post("/api/myspike/index/build", async (req, res) => {
+  try {
+    const fromPage = Number(req.body?.fromPage || 1);
+    const toPage = Number(req.body?.toPage || fromPage);
+
+    let index = loadCuIndex();
+    const meta = loadCuMeta();
+
+    let added = 0;
+    for (let p = fromPage; p <= toPage; p++) {
+      const { cpIds } = await fetchNossListPage(p);
+
+      for (const cpId of cpIds) {
+        const cp = await fetchJdLinksFromCpId(cpId);
+
+        for (const jd of cp.jdLinks) {
+          const cu = await fetchCuFromJd(jd.jdId);
+
+          if (!cu.cuTitle) continue;
+
+          const exists = index.some((x) => String(x.cuCode) === String(cu.cuCode));
+          if (exists) continue;
+
+          index.push({
+            ...cu,
+            cpId: cp.cpId,
+            cpUrl: cp.url,
+            nossCode_fromCPC: cp.nossCode,
+            nossTitle_fromCPC: cp.nossTitle,
+            indexedAt: new Date().toISOString(),
+          });
+          added++;
+        }
+      }
+
+      meta.lastPage = Math.max(meta.lastPage || 0, p);
+    }
+
+    meta.totalCU = index.length;
+    meta.updatedAt = new Date().toISOString();
+    meta.note = "REAL CU INDEX (from JD)";
+
+    saveCuIndex(index);
+    saveCuMeta(meta);
+
+    res.json({ ok: true, fromPage, toPage, added, meta });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// Search CU dalam index (real)
+app.post("/api/myspike/cu/search", (req, res) => {
+  try {
+    const q = norm(req.body?.q || "").toLowerCase();
+    const limit = Math.max(1, Math.min(200, Number(req.body?.limit || 50)));
+
+    const index = loadCuIndex();
+    if (!q) return res.json({ ok: true, q, totalIndexed: index.length, hits: [] });
+
+    const hits = index
+      .map((cu) => {
+        const hay = `${cu.cuCode} ${cu.cuTitle} ${cu.cuDesc}`.toLowerCase();
+        const score =
+          (String(cu.cuTitle || "").toLowerCase().includes(q) ? 3 : 0) +
+          (String(cu.cuDesc || "").toLowerCase().includes(q) ? 2 : 0) +
+          (String(cu.cuCode || "").toLowerCase().includes(q) ? 1 : 0) +
+          (hay.includes(q) ? 1 : 0);
+        return { cu, score };
+      })
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, limit)
+      .map((x) => x.cu);
+
+    return res.json({ ok: true, q, totalIndexed: index.length, hits });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+/* ======================================================
+ * 5) MySPIKE Comparator (REAL AI)
  * ====================================================== */
 
-// >>>> kekalkan semua fungsi MySPIKE Prof dari sini sampai debug/openai
-// (Saya tak ubah bahagian panjang itu — Prof boleh paste semula blok MySPIKE yang Prof dah ada)
+function cosineSimilarity(a, b) {
+  let dot = 0,
+    na = 0,
+    nb = 0;
+  const len = Math.min(a.length, b.length);
+  for (let i = 0; i < len; i++) {
+    const x = a[i];
+    const y = b[i];
+    dot += x * y;
+    na += x * x;
+    nb += y * y;
+  }
+  if (na === 0 || nb === 0) return 0;
+  return dot / (Math.sqrt(na) * Math.sqrt(nb));
+}
 
-// --- PASTE BLOK MYSPIKE PROF DI SINI ---
+function confidenceLabel(score) {
+  if (score >= 0.85) return "HIGH";
+  if (score >= 0.78) return "MEDIUM";
+  if (score >= 0.7) return "LOW";
+  return "NONE";
+}
+
+function buildCuText(cu) {
+  const title = String(cu.cuTitle || cu.title || "").trim();
+  const code = String(cu.cuCode || cu.code || "").trim();
+  const acts = Array.isArray(cu.activities) ? cu.activities : [];
+  const actTitles = acts
+    .map((a) => String(a.waTitle || a.title || "").trim())
+    .filter(Boolean)
+    .join("; ");
+  return `CU ${code}: ${title}\nAktiviti: ${actTitles}`.trim();
+}
+
+function buildMyspikeCuText(item) {
+  const title = String(item.cuTitle || "").trim();
+  const code = String(item.cuCode || "").trim();
+  const desc = String(item.cuDesc || "").trim();
+  return `MySPIKE CU ${code}: ${title}\nHuraian: ${desc}`.trim();
+}
+
+// In-memory embeddings cache (MVP)
+let MYSPIKE_CU_ITEMS = null;
+let MYSPIKE_CU_EMB = null;
+let MYSPIKE_CU_LOADED_AT = null;
+
+async function ensureMyspikeCuEmbeddings({ model = "text-embedding-3-small" } = {}) {
+  const items = loadCuIndex();
+  if (!items.length) {
+    MYSPIKE_CU_ITEMS = [];
+    MYSPIKE_CU_EMB = [];
+    MYSPIKE_CU_LOADED_AT = new Date().toISOString();
+    return;
+  }
+
+  if (MYSPIKE_CU_ITEMS && MYSPIKE_CU_EMB && MYSPIKE_CU_ITEMS.length === items.length) return;
+
+  if (!process.env.OPENAI_API_KEY) throw new Error("OPENAI_API_KEY belum diset");
+
+  const inputs = items.map(buildMyspikeCuText);
+
+  const batchSize = 200;
+  const allEmb = [];
+  for (let i = 0; i < inputs.length; i += batchSize) {
+    const batch = inputs.slice(i, i + batchSize);
+    const emb = await client.embeddings.create({ model, input: batch });
+    for (const d of emb.data) allEmb.push(d.embedding);
+  }
+
+  MYSPIKE_CU_ITEMS = items;
+  MYSPIKE_CU_EMB = allEmb;
+  MYSPIKE_CU_LOADED_AT = new Date().toISOString();
+}
+
+/**
+ * POST /api/s2/compare
+ */
+app.post("/api/s2/compare", async (req, res) => {
+  try {
+    const { sessionId, cus, options, meta } = req.body || {};
+    const list = Array.isArray(cus) ? cus : [];
+
+    if (!list.length) {
+      return res.status(400).json({ error: "cus kosong. Sila hantar sekurang-kurangnya 1 CU." });
+    }
+
+    const thresholdAda = Number(options?.thresholdAda ?? 0.78);
+    const topK = Math.max(1, Math.min(10, Number(options?.topK ?? 3)));
+
+    await ensureMyspikeCuEmbeddings({ model: "text-embedding-3-small" });
+
+    const myItems = MYSPIKE_CU_ITEMS || [];
+    const myEmb = MYSPIKE_CU_EMB || [];
+
+    if (!myItems.length) {
+      return res.status(400).json({
+        error: "Index MySPIKE CU masih kosong. Sila bina index dulu: POST /api/myspike/index/build",
+      });
+    }
+
+    const cuTexts = list.map(buildCuText);
+    const cuEmbRes = await client.embeddings.create({
+      model: "text-embedding-3-small",
+      input: cuTexts,
+    });
+    const cuEmb = cuEmbRes.data.map((d) => d.embedding);
+
+    const results = list.map((cu, idx) => {
+      const vec = cuEmb[idx];
+
+      const scored = myItems.map((item, j) => {
+        const score = cosineSimilarity(vec, myEmb[j]);
+        return { cuCode: item.cuCode, cuTitle: item.cuTitle, score: Number(score.toFixed(4)) };
+      });
+
+      scored.sort((a, b) => b.score - a.score);
+      const top = scored.slice(0, topK);
+
+      const best = top[0] ? top[0].score : 0;
+      const conf = confidenceLabel(best);
+      const status = best >= thresholdAda ? "ADA" : "TIADA";
+
+      return {
+        input: {
+          cuCode: cu.cuCode || "",
+          cuTitle: cu.cuTitle || cu.title || "",
+          activitiesCount: Array.isArray(cu.activities) ? cu.activities.length : 0,
+        },
+        decision: { status, bestScore: best, confidence: conf, thresholdAda },
+        matches: top,
+      };
+    });
+
+    return res.json({
+      ok: true,
+      sessionId: sessionId || meta?.sessionId || "unknown",
+      meta: meta || {},
+      myspike: {
+        source: "REAL_INDEX",
+        loadedAt: MYSPIKE_CU_LOADED_AT,
+        totalCandidates: myItems.length,
+        embeddingModel: "text-embedding-3-small",
+      },
+      summary: {
+        totalCU: results.length,
+        ada: results.filter((r) => r.decision.status === "ADA").length,
+        tiada: results.filter((r) => r.decision.status === "TIADA").length,
+      },
+      results,
+      generatedAt: new Date().toISOString(),
+    });
+  } catch (e) {
+    console.error("S2 compare error:", e);
+    return res.status(500).json({
+      error: "Gagal buat perbandingan MySPIKE",
+      detail: String(e?.message || e),
+    });
+  }
+});
+
+/* =========================
+ * DEBUG: OpenAI connection
+ * ========================= */
+app.get("/debug/openai", async (req, res) => {
+  try {
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ ok: false, message: "OPENAI_API_KEY belum diset" });
+    }
+
+    const r = await client.embeddings.create({
+      model: "text-embedding-3-small",
+      input: "test connection",
+    });
+
+    return res.json({ ok: true, embedding_dim: r.data?.[0]?.embedding?.length || null });
+  } catch (e) {
+    return res.status(500).json({
+      ok: false,
+      message: e?.message || "OpenAI debug error",
+      detail: e?.response?.data || null,
+    });
+  }
+});
 
 /* =========================
  * SERVER START (PALING BAWAH)
