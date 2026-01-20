@@ -28,6 +28,13 @@ const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
+app.get("/health", (req, res) => {
+  res.json({
+    status: "ok",
+    service: "dacum-backend",
+    time: new Date().toISOString(),
+  });
+});
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*" } });
