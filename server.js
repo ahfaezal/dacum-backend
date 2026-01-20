@@ -422,40 +422,76 @@ app.post("/api/cluster/preview", async (req, res) => {
   }
 });
 
-// REAL cluster RUN (OpenAI)
+// REAL cluster RUN (OpenAI) — ikut bahasa session (MS/EN) + auto-lock
 app.post("/api/cluster/run", async (req, res) => {
   try {
     const sid = String(req.body?.sessionId || "").trim();
     if (!sid) return res.status(400).json({ error: "sessionId diperlukan" });
 
-    const items = getSessionCards(sid);
-    if (items.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
+    // Pastikan session wujud
+    const s = ensureSession(sid);
+    if (!s) return res.status(400).json({ error: "sessionId tidak sah" });
 
-    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
+    const items = getSessionCards(sid);
+    if (items.length < 5) {
+      return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
+    }
+
+    if (!process.env.OPENAI_API_KEY) {
+      return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
+    }
 
     const cards = items
       .map((c) => ({ id: c.id, activity: getCardText(c) }))
       .filter((c) => c.activity);
 
-    if (cards.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+    if (cards.length < 5) {
+      return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+    }
+
+    // =========================
+    // Bahasa outcome ikut tetapan fasilitator
+    // =========================
+    const lang = String(s.lang || "MS").toUpperCase(); // "MS" | "EN"
+
+    // Auto-lock bila run cluster (kalau belum lock)
+    // (selari dgn rule: selepas outcome, bahasa mesti konsisten)
+    if (!s.langLocked) {
+      s.langLocked = true;
+      s.lockedAt = new Date().toISOString();
+      s.updatedAt = s.lockedAt;
+    }
+
+    const langRule =
+      lang === "EN"
+        ? [
+            "Cluster titles MUST be in English (EN).",
+            "Even if activity text is mixed Malay/English, the cluster title MUST remain English.",
+            "Use concise titles (2–6 words).",
+          ].join("\n")
+        : [
+            "Tajuk kluster MESTI dalam Bahasa Melayu (MS).",
+            "Walaupun teks aktiviti bercampur BM/EN, tajuk kluster MESTI kekal Bahasa Melayu.",
+            "Tajuk ringkas (2–6 perkataan).",
+          ].join("\n");
 
     const prompt = `
-Anda ialah fasilitator DACUM.
-Tugas: klusterkan aktiviti kerja kepada kumpulan CU yang logik.
+You are a DACUM facilitator.
+Task: Cluster work activities into logical CU groups.
 
-Keluaran mestilah JSON SAHAJA, format:
+Output must be JSON ONLY, format:
 {
   "clusters":[{"title":"...","cardIds":[1,2,3]}],
   "unassigned":[]
 }
 
-Peraturan:
-- Bilangan cluster antara 4 hingga 12 (ikut kesesuaian).
-- Tajuk cluster ringkas (2–6 perkataan) dalam Bahasa Melayu.
-- Setiap cardId hanya berada dalam SATU cluster.
-- Jika aktiviti terlalu umum/pelik, letak dalam unassigned.
+Rules:
+- Number of clusters: 4 to 12 (as appropriate).
+- Each cardId must appear in ONLY ONE cluster.
+- If an activity is too general/odd, put it into unassigned.
+- ${langRule}
 
-Data aktiviti:
+Activities:
 ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
 `.trim();
 
@@ -464,7 +500,7 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
       temperature: 0.2,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "Anda menjawab dengan JSON sahaja." },
+        { role: "system", content: "Return JSON only." },
         { role: "user", content: prompt },
       ],
     });
@@ -490,8 +526,13 @@ ${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
 
     const unassigned = Array.isArray(parsed.unassigned) ? parsed.unassigned : [];
 
+    // Result simpan
     const result = {
+      ok: true,
       sessionId: sid,
+      lang,
+      langLocked: !!s.langLocked,
+      lockedAt: s.lockedAt || null,
       generatedAt: new Date().toISOString(),
       clusters,
       unassigned,
