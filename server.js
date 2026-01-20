@@ -439,53 +439,43 @@ app.get("/api/cpc/:sessionId", (req, res) => {
 
   const cards = getSessionCards(sessionId);
 
-// bina CU → WA (auto-detect field)
+// bina CU → WA (ikut struktur card sebenar: cuTitle + activity/name)
 const cuMap = {};
 cards.forEach((c, idx) => {
-  const cuCode =
-    c.cuCode ||
-    c.cu_id ||
-    c.cuId ||
-    c.cu ||
-    (c.cuTitle ? `CU${idx + 1}` : "");
+  const cuTitle = String(c.cuTitle || "").trim();
+  const waTitle = String(c.activity || c.name || c.title || "").trim();
 
-  const waCode =
-    c.waCode ||
-    c.wa_id ||
-    c.waId ||
-    c.wa ||
-    (c.waTitle ? `WA${idx + 1}` : "");
+  if (!cuTitle || !waTitle) return;
 
-  const cuTitle =
-    c.cuTitle ||
-    c.cu_title ||
-    c.cuName ||
-    c.unitTitle ||
-    c.cu ||
-    "";
-
-  const waTitle =
-    c.waTitle ||
-    c.wa_title ||
-    c.waName ||
-    c.activityTitle ||
-    c.title ||
-    c.wa ||
-    "";
-
-  if (!cuCode || !waCode) return;
-
-  if (!cuMap[cuCode]) {
-    cuMap[cuCode] = { cuCode, cuTitle, wa: [] };
+  if (!cuMap[cuTitle]) {
+    cuMap[cuTitle] = {
+      cuCode: "",     // akan diisi semula
+      cuTitle,
+      wa: [],
+    };
   }
 
-  const exists = cuMap[cuCode].wa.some(
-    (w) =>
-      String(w.waCode) === String(waCode) &&
-      String(w.waTitle) === String(waTitle)
+  // elak duplicate WA (berdasarkan tajuk)
+  const exists = cuMap[cuTitle].wa.some(
+    (w) => w.waTitle.toLowerCase() === waTitle.toLowerCase()
   );
-  if (!exists) cuMap[cuCode].wa.push({ waCode, waTitle });
+  if (!exists) {
+    cuMap[cuTitle].wa.push({
+      waCode: "",
+      waTitle,
+    });
+  }
 });
+
+// kemaskan kod CU & WA ikut format JPK (C01-W01)
+const units = Object.values(cuMap).map((u, i) => ({
+  ...u,
+  cuCode: `C${String(i + 1).padStart(2, "0")}`,
+  wa: u.wa.map((w, j) => ({
+    ...w,
+    waCode: `W${String(j + 1).padStart(2, "0")}`,
+  })),
+}));
 
 const units = Object.values(cuMap);
 
