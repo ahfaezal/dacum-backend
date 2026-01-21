@@ -53,6 +53,531 @@ app.get("/health", (req, res) => {
 app.get("/", (req, res) => res.send("iNOSS Backend OK"));
 
 /* ======================================================
+ * FASA 3: CP BUILDER (LOCKED CONTRACT v1.0)
+ * - CP ikut bahasa CPC (BM/EN)
+ * - CU & WA mesti exact match dari CPC (/api/cpc/:sessionId)
+ * - Min: CU>=3 WA, WA>=3 WS, WS=1 PC (VOC)
+ * - WS lengkap mula→akhir (validator basic)
+ * ====================================================== */
+
+// ------------------------------
+// CP In-Memory Store (boleh tukar DB kemudian)
+// ------------------------------
+const cpStore = {}; 
+// shape: cpStore[sessionId][cuId] = { latestVersion: "v1", versions: [{version, cp}] }
+
+function _ensureCpBucket(sessionId) {
+  if (!cpStore[sessionId]) cpStore[sessionId] = {};
+  return cpStore[sessionId];
+}
+
+function _getLatestCp(sessionId, cuId) {
+  const bucket = cpStore?.[sessionId]?.[cuId];
+  if (!bucket || !bucket.versions?.length) return null;
+  return bucket.versions[bucket.versions.length - 1];
+}
+
+function _saveCpVersion(sessionId, cuId, cp, { bumpVersion = false } = {}) {
+  const bucket = _ensureCpBucket(sessionId);
+  if (!bucket[cuId]) bucket[cuId] = { latestVersion: null, versions: [] };
+
+  const cur = bucket[cuId];
+  let nextV = "v1";
+  if (cur.versions.length) {
+    const lastV = cur.versions[cur.versions.length - 1].version || "v1";
+    const n = Number(String(lastV).replace(/^v/i, "")) || 1;
+    nextV = bumpVersion ? `v${n + 1}` : lastV; // save working overwrite uses same version
+  }
+
+  // overwrite if same version (WORKING save)
+  const idx = cur.versions.findIndex((x) => x.version === nextV);
+  const payload = { version: nextV, cp };
+
+  if (idx >= 0) cur.versions[idx] = payload;
+  else cur.versions.push(payload);
+
+  cur.latestVersion = nextV;
+  return nextV;
+}
+
+// ------------------------------
+// CPC fetch helper (source of truth)
+// ------------------------------
+async function fetchCpcFinal(sessionId) {
+  const sid = String(sessionId || "").trim();
+  if (!sid) throw new Error("sessionId kosong");
+
+  // NOTE: endpoint sedia ada (confirmed dari Network)
+  const url = `https://dacum-backend.onrender.com/api/cpc/${encodeURIComponent(sid)}`;
+  const r = await fetch(url);
+  if (!r.ok) throw new Error(`Gagal fetch CPC (${r.status})`);
+  const json = await r.json();
+  return json;
+}
+
+// ------------------------------
+// Bahasa: ikut CPC (BM/EN)
+// ------------------------------
+function detectLanguageFromCpc(cpc) {
+  const raw =
+    String(cpc?.language || cpc?.bahasa || cpc?.lang || cpc?.meta?.language || "").trim();
+
+  if (/^ms|bm|malay|bahasa/i.test(raw)) return "MS";
+  if (/^en|english/i.test(raw)) return "EN";
+
+  // fallback infer dari teks CU/WA
+  const sample =
+    String(cpc?.terasTitle || "") +
+    " " +
+    String(cpc?.teras || "") +
+    " " +
+    JSON.stringify(cpc?.cus || cpc?.data?.cus || cpc?.cpc?.cus || "").slice(0, 400);
+
+  // heuristik ringkas
+  if (/\b(dan|urus|pengurusan|penilaian|penyediaan|laksana|rancang|analisis|sediakan|jana)\b/i.test(sample))
+    return "MS";
+
+  return "EN";
+}
+
+// ------------------------------
+// Normalizer: extract CU list dari CPC JSON (tahan variasi)
+// ------------------------------
+function extractCusFromCpc(cpc) {
+  const cus =
+    cpc?.cus ||
+    cpc?.data?.cus ||
+    cpc?.cpc?.cus ||
+    cpc?.result?.cus ||
+    [];
+
+  if (!Array.isArray(cus)) return [];
+  return cus;
+}
+
+function findCuInCpc(cpc, cuId) {
+  const cus = extractCusFromCpc(cpc);
+  const target = String(cuId || "").trim().toLowerCase();
+  return cus.find((c) => String(c?.cuId || c?.id || "").trim().toLowerCase() === target) || null;
+}
+
+function extractWaFromCu(cu) {
+  const wa = cu?.wa || cu?.workActivities || cu?.activities || cu?.was || [];
+  if (!Array.isArray(wa)) return [];
+  return wa.map((x) => ({
+    waId: x?.waId || x?.id || x?.code || "",
+    waCode: x?.waCode || x?.code || "",
+    waTitle: x?.waTitle || x?.title || x?.name || "",
+  }));
+}
+
+// ------------------------------
+// Generator: WS + PC (VOC) ikut WA title (EN/MS)
+// ------------------------------
+function makePcText({ lang, verb, object, qualifier }) {
+  if (lang === "MS") {
+    // BM: pasif hasil (lebih regulator-friendly)
+    const q = qualifier ? ` ${qualifier}` : "";
+    return `${object} ${verb}${q}.`.replace(/\s+/g, " ").trim();
+  }
+  // EN
+  const q = qualifier ? ` ${qualifier}` : "";
+  return `${object} is ${verb}${q}.`.replace(/\s+/g, " ").trim();
+}
+
+function waTemplatesForEN(waTitle) {
+  const t = String(waTitle || "").trim().toLowerCase();
+
+  if (t.startsWith("analyze")) {
+    return [
+      { ws: "Identify applicable standards and requirements.", verb: "identified", object: "Applicable standards and requirements", qualifier: "according to organizational and regulatory guidelines" },
+      { ws: "Review current practices and records.", verb: "reviewed", object: "Current practices and records", qualifier: "to determine gaps and risks" },
+      { ws: "Document analysis findings.", verb: "documented", object: "Analysis findings", qualifier: "in accordance with documentation procedures" },
+    ];
+  }
+  if (t.startsWith("plan")) {
+    return [
+      { ws: "Define scope, objectives, and timeline.", verb: "defined", object: "Scope, objectives, and timeline", qualifier: "based on organizational needs" },
+      { ws: "Allocate resources and responsibilities.", verb: "allocated", object: "Resources and responsibilities", qualifier: "according to roles and workload" },
+      { ws: "Prepare plan documentation for approval.", verb: "prepared", object: "Plan documentation", qualifier: "for review and approval" },
+    ];
+  }
+  if (t.startsWith("perform")) {
+    return [
+      { ws: "Execute tasks according to the approved plan.", verb: "executed", object: "Tasks", qualifier: "according to the approved plan and procedures" },
+      { ws: "Record transactions and supporting evidence.", verb: "recorded", object: "Transactions and supporting evidence", qualifier: "accurately and completely" },
+      { ws: "File records in the designated system.", verb: "filed", object: "Records", qualifier: "in the designated filing system for traceability" },
+    ];
+  }
+  if (t.startsWith("evaluate")) {
+    return [
+      { ws: "Verify outputs against requirements.", verb: "verified", object: "Outputs", qualifier: "against defined requirements and standards" },
+      { ws: "Identify nonconformities and improvement actions.", verb: "identified", object: "Nonconformities and improvement actions", qualifier: "based on evaluation results" },
+      { ws: "Report evaluation results to relevant parties.", verb: "reported", object: "Evaluation results", qualifier: "to relevant parties for decision making" },
+    ];
+  }
+  if (t.startsWith("prepare") || t.startsWith("generate")) {
+    return [
+      { ws: "Compile required data and records.", verb: "compiled", object: "Required data and records", qualifier: "from verified sources" },
+      { ws: "Produce the report using approved format.", verb: "produced", object: "The report", qualifier: "using the approved template and format" },
+      { ws: "Submit report for review and filing.", verb: "submitted", object: "The report", qualifier: "for review, approval, and filing" },
+    ];
+  }
+
+  // fallback generic
+  return [
+    { ws: "Identify requirements and inputs.", verb: "identified", object: "Requirements and inputs", qualifier: "according to relevant guidelines" },
+    { ws: "Carry out the work according to procedure.", verb: "performed", object: "Work activities", qualifier: "according to procedure and safety requirements" },
+    { ws: "Record and file outputs.", verb: "recorded", object: "Outputs", qualifier: "for traceability and future reference" },
+  ];
+}
+
+function waTemplatesForMS(waTitle) {
+  const t = String(waTitle || "").trim().toLowerCase();
+
+  if (/^analisis|^menganalisis|^kenal pasti/.test(t)) {
+    return [
+      { ws: "Kenal pasti standard dan keperluan berkaitan.", verb: "ditentukan", object: "Standard dan keperluan berkaitan", qualifier: "berdasarkan garis panduan organisasi dan peraturan" },
+      { ws: "Semak amalan dan rekod semasa.", verb: "disemak", object: "Amalan dan rekod semasa", qualifier: "bagi mengenal pasti jurang dan risiko" },
+      { ws: "Dokumentasikan dapatan analisis.", verb: "didokumentasikan", object: "Dapatan analisis", qualifier: "mengikut prosedur pendokumenan" },
+    ];
+  }
+  if (/^rancang|^merancang/.test(t)) {
+    return [
+      { ws: "Tetapkan skop, objektif dan garis masa.", verb: "ditetapkan", object: "Skop, objektif dan garis masa", qualifier: "berdasarkan keperluan organisasi" },
+      { ws: "Agihkan sumber dan tanggungjawab.", verb: "diagihkan", object: "Sumber dan tanggungjawab", qualifier: "mengikut peranan dan beban tugas" },
+      { ws: "Sediakan dokumen perancangan untuk kelulusan.", verb: "disediakan", object: "Dokumen perancangan", qualifier: "untuk semakan dan kelulusan" },
+    ];
+  }
+  if (/^laksana|^melaksana|^jalankan|^buat/.test(t)) {
+    return [
+      { ws: "Laksanakan tugasan mengikut pelan yang diluluskan.", verb: "dilaksanakan", object: "Tugasan", qualifier: "mengikut pelan diluluskan dan prosedur kerja" },
+      { ws: "Rekod transaksi dan bukti sokongan.", verb: "direkodkan", object: "Transaksi dan bukti sokongan", qualifier: "secara tepat dan lengkap" },
+      { ws: "Simpan rekod dalam sistem pemfailan yang ditetapkan.", verb: "disimpan", object: "Rekod", qualifier: "dalam sistem pemfailan bagi tujuan kebolehkesanan" },
+    ];
+  }
+  if (/^nilai|^menilai|^semak/.test(t)) {
+    return [
+      { ws: "Sahkan output berdasarkan keperluan.", verb: "disahkan", object: "Output", qualifier: "berdasarkan keperluan dan standard ditetapkan" },
+      { ws: "Kenal pasti ketakakuran dan tindakan penambahbaikan.", verb: "dikenal pasti", object: "Ketakakuran dan tindakan penambahbaikan", qualifier: "berdasarkan hasil penilaian" },
+      { ws: "Laporkan hasil penilaian kepada pihak berkaitan.", verb: "dilaporkan", object: "Hasil penilaian", qualifier: "kepada pihak berkaitan untuk tindakan" },
+    ];
+  }
+  if (/^sediakan|^jana|^hasilkan|^lapor/.test(t)) {
+    return [
+      { ws: "Kumpulkan data dan rekod yang diperlukan.", verb: "dikumpulkan", object: "Data dan rekod yang diperlukan", qualifier: "daripada sumber yang disahkan" },
+      { ws: "Hasilkan laporan mengikut format yang diluluskan.", verb: "dihasilkan", object: "Laporan", qualifier: "mengikut templat dan format diluluskan" },
+      { ws: "Serahkan laporan untuk semakan dan pemfailan.", verb: "diserahkan", object: "Laporan", qualifier: "untuk semakan, kelulusan dan pemfailan" },
+    ];
+  }
+
+  return [
+    { ws: "Kenal pasti keperluan dan input kerja.", verb: "dikenal pasti", object: "Keperluan dan input kerja", qualifier: "mengikut garis panduan berkaitan" },
+    { ws: "Laksanakan aktiviti mengikut prosedur.", verb: "dilaksanakan", object: "Aktiviti kerja", qualifier: "mengikut prosedur dan keperluan keselamatan" },
+    { ws: "Rekod dan failkan output.", verb: "direkodkan", object: "Output", qualifier: "untuk kebolehkesanan dan rujukan" },
+  ];
+}
+
+function generateCpDraft({ sessionId, cpc, cu }) {
+  const lang = detectLanguageFromCpc(cpc); // "EN"|"MS"
+  const waList = extractWaFromCu(cu);
+
+  const cp = {
+    sessionId,
+    cpId: null, // filled on lock
+    cpcVersion: String(cpc?.generatedAt || cpc?.exportedAt || cpc?.version || "CPC").trim(),
+    status: "DRAFT",
+    cu: {
+      cuId: cu?.cuId || cu?.id || "",
+      cuCode: cu?.cuCode || cu?.code || "",
+      cuTitle: cu?.cuTitle || cu?.title || "",
+      cuDescription: cu?.cuDescription || cu?.description || "",
+    },
+    workActivities: waList.map((wa, i) => {
+      const templates = lang === "MS" ? waTemplatesForMS(wa.waTitle) : waTemplatesForEN(wa.waTitle);
+
+      const workSteps = templates.map((tpl, idx) => {
+        const wsNo = `${i + 1}.${idx + 1}`;
+        const verb = tpl.verb;
+        const object = tpl.object;
+        const qualifier = tpl.qualifier;
+
+        return {
+          wsId: `${wa.waId || `WA${i + 1}`}-S${idx + 1}`,
+          wsNo,
+          wsText: tpl.ws,
+          pc: {
+            pcId: `${wa.waId || `WA${i + 1}`}-P${idx + 1}`,
+            pcNo: wsNo,
+            verb,
+            object,
+            qualifier,
+            pcText: makePcText({ lang, verb, object, qualifier }),
+          },
+        };
+      });
+
+      return {
+        waId: wa.waId || `C${i + 1}-W01`,
+        waCode: wa.waCode || wa.waId || "",
+        waTitle: wa.waTitle || "",
+        workSteps,
+      };
+    }),
+    validation: {
+      minRulesPassed: false,
+      vocPassed: false,
+      completenessPassed: false,
+      issues: [],
+    },
+    audit: {
+      createdAt: new Date().toISOString(),
+      createdBy: "AI",
+      updatedAt: new Date().toISOString(),
+      updatedBy: ["AI"],
+      lockedAt: null,
+      lockedBy: null,
+    },
+  };
+
+  return cp;
+}
+
+// ------------------------------
+// Validator: Min + VOC + Completeness (basic)
+// ------------------------------
+function validateCp(cp, { cpc, cuFromCpc } = {}) {
+  const issues = [];
+
+  // 1) CPC exact match (CU/WA)
+  if (cpc && cuFromCpc) {
+    const expectedCuTitle = String(cuFromCpc?.cuTitle || cuFromCpc?.title || "").trim();
+    const actualCuTitle = String(cp?.cu?.cuTitle || "").trim();
+    if (expectedCuTitle && actualCuTitle && expectedCuTitle !== actualCuTitle) {
+      issues.push({ level: "ERROR", code: "CPC_MISMATCH_CU_TITLE", msg: "Tajuk CU tidak sama seperti CPC (exact match wajib)." });
+    }
+
+    const expectedWA = extractWaFromCu(cuFromCpc).map((w) => String(w.waTitle || "").trim());
+    const actualWA = (cp?.workActivities || []).map((w) => String(w.waTitle || "").trim());
+
+    // Semak semua WA CP wujud dalam CPC & sama
+    for (const t of actualWA) {
+      if (t && !expectedWA.includes(t)) {
+        issues.push({ level: "ERROR", code: "CPC_MISMATCH_WA_TITLE", msg: `Tajuk WA tidak sama seperti CPC: "${t}"` });
+      }
+    }
+  }
+
+  // 2) Minimum rules
+  const waCount = (cp?.workActivities || []).length;
+  if (waCount < 3) issues.push({ level: "ERROR", code: "MIN_WA", msg: "Setiap CU mesti ada sekurang-kurangnya 3 WA." });
+
+  let minWsOk = true;
+  let onePcOk = true;
+
+  for (const wa of cp?.workActivities || []) {
+    const ws = wa?.workSteps || [];
+    if (ws.length < 3) {
+      minWsOk = false;
+      issues.push({ level: "ERROR", code: "MIN_WS", msg: `WA "${wa?.waTitle || wa?.waId}" mesti ada sekurang-kurangnya 3 WS.` });
+    }
+    for (const step of ws) {
+      if (!step?.pc) {
+        onePcOk = false;
+        issues.push({ level: "ERROR", code: "MISSING_PC", msg: `WS "${step?.wsNo || step?.wsId}" mesti ada 1 PC.` });
+      }
+    }
+  }
+
+  const minRulesPassed = waCount >= 3 && minWsOk && onePcOk;
+
+  // 3) VOC
+  let vocPassed = true;
+  for (const wa of cp?.workActivities || []) {
+    for (const step of wa?.workSteps || []) {
+      const pc = step?.pc || {};
+      if (!String(pc?.verb || "").trim() || !String(pc?.object || "").trim() || !String(pc?.qualifier || "").trim()) {
+        vocPassed = false;
+        issues.push({ level: "ERROR", code: "VOC_FAIL", msg: `PC untuk WS "${step?.wsNo || step?.wsId}" mesti ada Verb+Object+Qualifier.` });
+      }
+    }
+  }
+
+  // 4) Completeness (basic): WS mesti ada sekurang-kurangnya 3 step dan ada unsur "semak/verify" & "rekod/simpan/submit"
+  let completenessPassed = true;
+  for (const wa of cp?.workActivities || []) {
+    const text = (wa?.workSteps || []).map((s) => String(s?.wsText || "")).join(" ").toLowerCase();
+    const hasCheck = /(review|verify|validate|audit|semak|sahkan|validasi|pengesahan)/i.test(text);
+    const hasRecord = /(record|document|file|submit|report|rekod|dokumen|fail|serah|lapor|pemfailan)/i.test(text);
+
+    if (!hasCheck || !hasRecord) {
+      completenessPassed = false;
+      issues.push({
+        level: "WARNING",
+        code: "WS_INCOMPLETE",
+        msg: `WA "${wa?.waTitle || wa?.waId}" mungkin belum lengkap (tiada elemen semakan/pengesahan atau rekod/serahan).`,
+      });
+    }
+  }
+
+  return {
+    minRulesPassed,
+    vocPassed,
+    completenessPassed,
+    issues,
+  };
+}
+
+// ------------------------------
+// API: CP Draft / Get / Save / Validate / Lock
+// ------------------------------
+app.post("/api/cp/draft", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const cuId = String(req.body?.cuId || "").trim();
+    if (!sessionId || !cuId) return res.status(400).json({ error: "sessionId dan cuId wajib." });
+
+    const cpc = await fetchCpcFinal(sessionId);
+    const cuFromCpc = findCuInCpc(cpc, cuId);
+    if (!cuFromCpc) return res.status(404).json({ error: "CU tidak ditemui dalam CPC." });
+
+    // Generate draft
+    const cp = generateCpDraft({ sessionId, cpc, cu: cuFromCpc });
+
+    // Validate
+    const validation = validateCp(cp, { cpc, cuFromCpc });
+    cp.validation = validation;
+
+    // Save as v1 (draft)
+    _saveCpVersion(sessionId, cuId, cp, { bumpVersion: true });
+
+    return res.json(cp);
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+app.get("/api/cp/:sessionId/:cuId", (req, res) => {
+  const sessionId = String(req.params.sessionId || "").trim();
+  const cuId = String(req.params.cuId || "").trim();
+  const version = String(req.query?.version || "latest").trim();
+
+  const bucket = cpStore?.[sessionId]?.[cuId];
+  if (!bucket) return res.status(404).json({ error: "CP belum wujud. Jana draft dahulu." });
+
+  if (version === "latest") {
+    const latest = _getLatestCp(sessionId, cuId);
+    if (!latest) return res.status(404).json({ error: "CP belum wujud." });
+    return res.json(latest.cp);
+  }
+
+  const found = bucket.versions.find((x) => x.version === version);
+  if (!found) return res.status(404).json({ error: "Versi CP tidak ditemui." });
+  return res.json(found.cp);
+});
+
+app.put("/api/cp/:sessionId/:cuId", async (req, res) => {
+  try {
+    const sessionId = String(req.params.sessionId || "").trim();
+    const cuId = String(req.params.cuId || "").trim();
+    const cp = req.body;
+
+    if (!cp || typeof cp !== "object") return res.status(400).json({ error: "Body CP JSON diperlukan." });
+
+    // Re-validate vs CPC
+    const cpc = await fetchCpcFinal(sessionId);
+    const cuFromCpc = findCuInCpc(cpc, cuId);
+    if (!cuFromCpc) return res.status(404).json({ error: "CU tidak ditemui dalam CPC." });
+
+    const validation = validateCp(cp, { cpc, cuFromCpc });
+    cp.validation = validation;
+    cp.audit = cp.audit || {};
+    cp.audit.updatedAt = new Date().toISOString();
+    cp.audit.updatedBy = Array.isArray(cp.audit.updatedBy) ? cp.audit.updatedBy : [];
+    if (!cp.audit.updatedBy.includes("FACILITATOR")) cp.audit.updatedBy.push("FACILITATOR");
+
+    // Save working to latest version (overwrite same)
+    const ver = _saveCpVersion(sessionId, cuId, cp, { bumpVersion: false });
+
+    return res.json({ ok: true, version: ver, validation });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post("/api/cp/validate", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const cuId = String(req.body?.cuId || "").trim();
+    const cp = req.body?.cp;
+
+    if (!sessionId || !cuId || !cp) return res.status(400).json({ error: "sessionId, cuId, dan cp wajib." });
+
+    const cpc = await fetchCpcFinal(sessionId);
+    const cuFromCpc = findCuInCpc(cpc, cuId);
+    if (!cuFromCpc) return res.status(404).json({ error: "CU tidak ditemui dalam CPC." });
+
+    const validation = validateCp(cp, { cpc, cuFromCpc });
+    return res.json(validation);
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+app.post("/api/cp/lock", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const cuId = String(req.body?.cuId || "").trim();
+    const lockedBy = String(req.body?.lockedBy || "PANEL").trim();
+
+    const latest = _getLatestCp(sessionId, cuId);
+    if (!latest) return res.status(404).json({ error: "CP belum wujud. Jana draft dahulu." });
+
+    const cpc = await fetchCpcFinal(sessionId);
+    const cuFromCpc = findCuInCpc(cpc, cuId);
+    if (!cuFromCpc) return res.status(404).json({ error: "CU tidak ditemui dalam CPC." });
+
+    // Re-validate sebelum lock
+    const cp = latest.cp;
+    const validation = validateCp(cp, { cpc, cuFromCpc });
+    cp.validation = validation;
+
+    const hasError = (validation.issues || []).some((x) => x.level === "ERROR");
+    if (hasError) {
+      return res.status(400).json({ error: "Tak boleh LOCK kerana ada ERROR pada validation.", validation });
+    }
+
+    cp.status = "LOCKED";
+    cp.audit = cp.audit || {};
+    cp.audit.lockedAt = new Date().toISOString();
+    cp.audit.lockedBy = lockedBy;
+
+    // bump version untuk lock (v2, v3...)
+    const ver = _saveCpVersion(sessionId, cuId, cp, { bumpVersion: true });
+    cp.cpId = `${sessionId}-${cuId}-${ver}`;
+
+    return res.json({ ok: true, cpId: cp.cpId, version: ver, validation });
+  } catch (e) {
+    return res.status(500).json({ error: String(e) });
+  }
+});
+
+// export JSON (docx/pdf kemudian)
+app.get("/api/cp/export/:sessionId/:cuId", (req, res) => {
+  const sessionId = String(req.params.sessionId || "").trim();
+  const cuId = String(req.params.cuId || "").trim();
+  const format = String(req.query?.format || "json").trim().toLowerCase();
+
+  const latest = _getLatestCp(sessionId, cuId);
+  if (!latest) return res.status(404).json({ error: "CP belum wujud." });
+
+  if (format !== "json") return res.status(400).json({ error: "Buat masa ini hanya format=json disokong." });
+
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  return res.send(JSON.stringify(latest.cp, null, 2));
+});
+
+/* ======================================================
  * 0) SESSIONS (CANONICAL)
  * ====================================================== */
 const sessions = {}; // { [sessionId]: { sessionId, createdAt, updatedAt, cards: [] } }
