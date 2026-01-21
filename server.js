@@ -1304,32 +1304,6 @@ cards.forEach((c, idx) => {
   }
 });
 
-// kemaskan kod CU & WA ikut format JPK (C01-W01)
-const units = Object.values(cuMap).map((u, i) => ({
-  ...u,
-  cuCode: `C${String(i + 1).padStart(2, "0")}`,
-  wa: u.wa.map((w, j) => ({
-    ...w,
-    waCode: `W${String(j + 1).padStart(2, "0")}`,
-  })),
-}));
-
-  return res.json({
-    sessionId,
-    lang: String(s.lang || "MS").toUpperCase(),
-    generatedAt: new Date().toISOString(),
-
-    // struktur CPC
-    teras: [
-      {
-        terasCode: "T01",
-        terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
-      },
-    ],
-    units,
-  });
-});
-
 // REAL cluster RUN (OpenAI) — ikut bahasa session (MS/EN) + auto-lock
 app.post("/api/cluster/run", async (req, res) => {
   try {
