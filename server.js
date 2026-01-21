@@ -2010,47 +2010,57 @@ app.get("/debug/openai", async (req, res) => {
 });
 
 // ===============================
-// CP DRAFT - GENERATE
+// CP DRAFT - GENERATE (REAL)
+// Serasi body:
+// - { sessionId, cuCode }  (baru)
+// - { session, cu }        (legacy)
+// - { sessionId, cuId }    (fallback)
 // ===============================
-app.post("/api/cp/draft", (req, res) => {
+app.post("/api/cp/draft", async (req, res) => {
   try {
-    const { session, cu } = req.body;
-    if (!session || !cu) {
-      return res.status(400).json({ error: "session & cu required" });
+    const sessionId = String(req.body?.sessionId || req.body?.session || "").trim();
+    const cuKeyRaw = String(req.body?.cuCode || req.body?.cu || req.body?.cuId || "").trim();
+
+    if (!sessionId || !cuKeyRaw) {
+      return res.status(400).json({ error: "sessionId/session dan cuCode/cu/cuId wajib." });
     }
 
-    const cuKey = String(cu).toLowerCase();
+    // Normalize CU key (frontend biasanya hantar "c01" atau "C01")
+    const cuKey = cuKeyRaw.toLowerCase();
 
-    // 1. ambil CPC hasil clustering
-    const cpc = loadCPC(session); // ikut storage sedia ada
-    if (!cpc || !cpc.cus) {
-      return res.status(404).json({ error: "CPC tidak ditemui" });
+    // Ambil CPC (source of truth)
+    // Nota: function ini mesti wujud di bahagian atas file (yang anda sudah ada):
+    // - fetchCpcFinal(sessionId)
+    // - findCuInCpc(cpc, cuCode)
+    // - generateCpDraft({ sessionId, cpc, cu })
+    // - validateCp(cp, { cpc, cuFromCpc })
+    // - _saveCpVersion(sessionId, cuId, cp, { bumpVersion })
+    const cpc = await fetchCpcFinal(sessionId);
+
+    const cuFromCpc = findCuInCpc(cpc, cuKey);
+    if (!cuFromCpc) {
+      return res.status(404).json({
+        error: "CU tidak ditemui dalam CPC (cuCode tidak match).",
+        sessionId,
+        cuKey,
+        hint: "Semak CU Code di CP Dashboard (contoh: c01/c02) mesti sama dengan cuCode dalam CPC (/api/cpc/:sessionId).",
+      });
     }
 
-    const cuData = cpc.cus.find(c => c.cuCode === cuKey);
-    if (!cuData) {
-      return res.status(404).json({ error: "CU tidak ditemui dalam CPC" });
-    }
+    // Jana draft
+    const cp = generateCpDraft({ sessionId, cpc, cu: cuFromCpc });
 
-    // 2. bina CP draft
-    const cpDraft = {
-      session,
-      cu: cuKey,
-      cuTitle: cuData.cuTitle,
-      wa: cuData.activities || [],
-      performanceCriteria: [],
-      workSteps: [],
-      status: "draft",
-      createdAt: new Date().toISOString()
-    };
+    // Validate (min rules + VOC + completeness)
+    const validation = validateCp(cp, { cpc, cuFromCpc });
+    cp.validation = validation;
 
-    // 3. simpan CP draft
-    saveCPDraft(session, cuKey, cpDraft);
+    // Simpan versi (draft = bump version)
+    const ver = _saveCpVersion(sessionId, cuKey, cp, { bumpVersion: true });
 
-    return res.json({ ok: true, cpDraft });
-  } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Failed to generate CP draft" });
+    return res.json({ ok: true, version: ver, cp });
+  } catch (e) {
+    console.error("CP draft error:", e);
+    return res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
@@ -2061,3 +2071,4 @@ const PORT = process.env.PORT || 10000;
 server.listen(PORT, () => {
   console.log("🚀 Server listening on", PORT);
 });
+
