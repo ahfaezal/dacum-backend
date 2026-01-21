@@ -434,12 +434,20 @@ function validateCp(cp, { cpc, cuFromCpc } = {}) {
 app.post("/api/cp/draft", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
-    const cuId = String(req.body?.cuId || "").trim();
-    if (!sessionId || !cuId) return res.status(400).json({ error: "sessionId dan cuId wajib." });
 
-    const cpc = await fetchCpcFinal(sessionId);
-    const cuFromCpc = findCuInCpc(cpc, cuId);
-    if (!cuFromCpc) return res.status(404).json({ error: "CU tidak ditemui dalam CPC." });
+    // LOCKED: frontend hantar cuCode (c01). Backward compatible: terima cuId juga.
+    const cuCode = String(req.body?.cuCode || req.body?.cuId || "").trim();
+
+    if (!sessionId || !cuCode) {
+      return res.status(400).json({ error: "sessionId dan cuCode wajib." });
+    }
+
+    const cpc = await fetchCpcJson(sessionId);
+    const cuFromCpc = findCuInCpc(cpc, cuCode);
+
+    if (!cuFromCpc) {
+      return res.status(404).json({ error: "CU tidak ditemui dalam CPC (cuCode tidak match)." });
+    }
 
     // Generate draft
     const cp = generateCpDraft({ sessionId, cpc, cu: cuFromCpc });
@@ -449,7 +457,7 @@ app.post("/api/cp/draft", async (req, res) => {
     cp.validation = validation;
 
     // Save as v1 (draft)
-    _saveCpVersion(sessionId, cuId, cp, { bumpVersion: true });
+    _saveCpVersion(sessionId, cuCode, cp, { bumpVersion: true });
 
     return res.json(cp);
   } catch (e) {
