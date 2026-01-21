@@ -291,6 +291,48 @@ app.post("/api/session/lock/:sessionId", (req, res) => {
   });
 });
 
+// ===============================
+// SESSION CUS (untuk ClusterPage "Reload CU (cus)")
+// ===============================
+
+// versi utama: frontend panggil /api/session/cus/:sessionId
+app.get("/api/session/cus/:sessionId", (req, res) => {
+  try {
+    const sid = String(req.params.sessionId || "").trim();
+    const s = ensureSession(sid);
+    if (!s) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+    return res.json({
+      ok: true,
+      sessionId: sid,
+      cus: Array.isArray(s.cus) ? s.cus : [],
+      appliedAt: s.appliedAt || null,
+      updatedAt: s.updatedAt || null,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
+// alias fallback (kalau ada code lama panggil query ?sessionId=...)
+app.get("/api/session/cus", (req, res) => {
+  try {
+    const sid = String(req.query?.sessionId || "").trim();
+    const s = ensureSession(sid);
+    if (!s) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+    return res.json({
+      ok: true,
+      sessionId: sid,
+      cus: Array.isArray(s.cus) ? s.cus : [],
+      appliedAt: s.appliedAt || null,
+      updatedAt: s.updatedAt || null,
+    });
+  } catch (e) {
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
+  }
+});
+
 /* ======================================================
  * 3) AI CLUSTER (PREVIEW + REAL)
  * ====================================================== */
