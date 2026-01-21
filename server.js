@@ -2032,6 +2032,51 @@ app.get("/debug/openai", async (req, res) => {
   }
 });
 
+// ===============================
+// CP DRAFT - GENERATE
+// ===============================
+app.post("/api/cp/draft", (req, res) => {
+  try {
+    const { session, cu } = req.body;
+    if (!session || !cu) {
+      return res.status(400).json({ error: "session & cu required" });
+    }
+
+    const cuKey = String(cu).toLowerCase();
+
+    // 1. ambil CPC hasil clustering
+    const cpc = loadCPC(session); // ikut storage sedia ada
+    if (!cpc || !cpc.cus) {
+      return res.status(404).json({ error: "CPC tidak ditemui" });
+    }
+
+    const cuData = cpc.cus.find(c => c.cuCode === cuKey);
+    if (!cuData) {
+      return res.status(404).json({ error: "CU tidak ditemui dalam CPC" });
+    }
+
+    // 2. bina CP draft
+    const cpDraft = {
+      session,
+      cu: cuKey,
+      cuTitle: cuData.cuTitle,
+      wa: cuData.activities || [],
+      performanceCriteria: [],
+      workSteps: [],
+      status: "draft",
+      createdAt: new Date().toISOString()
+    };
+
+    // 3. simpan CP draft
+    saveCPDraft(session, cuKey, cpDraft);
+
+    return res.json({ ok: true, cpDraft });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Failed to generate CP draft" });
+  }
+});
+
 /* =========================
  * SERVER START (PALING BAWAH)
  * ========================= */
