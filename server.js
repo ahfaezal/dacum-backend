@@ -155,19 +155,24 @@ function extractCusFromCpc(cpc) {
   return cus;
 }
 
-  function findCuInCpc(cpc, cuKey) {
-    const cus = extractCusFromCpc(cpc);
-    const target = String(cuKey || "").trim().toLowerCase();
-    if (!target) return null;
+function findCuInCpc(cpc, cuKey) {
+  const cus = extractCusFromCpc(cpc);
+  const target = String(cuKey || "").trim().toLowerCase();
+  if (!target) return null;
 
-    return (
-      cus.find((c) => {
-        const cuCode = String(c?.cuCode || c?.code || "").trim().toLowerCase();
-        const cuId = String(c?.cuId || c?.id || "").trim().toLowerCase();
-        return cuCode === target || cuId === target;
-      }) || null
-    );
-  }
+  return (
+    cus.find((c) => {
+      // LOCKED: cuCode dahulu, fallback legacy
+      const cuCode = String(c?.cuCode || c?.code || "").trim().toLowerCase();
+      const cuId = String(c?.cuId || c?.id || "").trim().toLowerCase();
+
+      // extra fallback (sesetengah data letak "cuCode" dalam field lain)
+      const alt = String(c?.cu || c?.cuID || c?.cu_id || "").trim().toLowerCase();
+
+      return cuCode === target || cuId === target || (alt && alt === target);
+    }) || null
+  );
+}
 
 function extractWaFromCu(cu) {
   const wa = cu?.wa || cu?.workActivities || cu?.activities || cu?.was || [];
