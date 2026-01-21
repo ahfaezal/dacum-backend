@@ -462,19 +462,37 @@ app.get("/api/cp/:sessionId/:cuId", (req, res) => {
   const cuId = String(req.params.cuId || "").trim();
   const version = String(req.query?.version || "latest").trim();
 
-  const bucket = cpStore?.[sessionId]?.[cuId];
-  if (!bucket) return res.status(404).json({ error: "CP belum wujud. Jana draft dahulu." });
+    const versionQ = String(req.query?.version || "latest").trim();
 
-  if (version === "latest") {
-    const latest = _getLatestCp(sessionId, cuId);
-    if (!latest) return res.status(404).json({ error: "CP belum wujud." });
-    return res.json(latest.cp);
-  }
+    const bucket = cpStore?.[sessionId]?.[cuId];
+    if (!bucket) {
+      return res.status(404).json({ error: "CP belum wujud. Jana draft dahulu." });
+    }
 
-  const found = bucket.versions.find((x) => x.version === version);
-  if (!found) return res.status(404).json({ error: "Versi CP tidak ditemui." });
-  return res.json(found.cp);
-});
+    const versions = Array.isArray(bucket.versions) ? bucket.versions : [];
+    if (!versions.length) {
+      return res.status(404).json({ error: "CP belum wujud. Jana draft dahulu." });
+    }
+
+    if (versionQ === "latest") {
+      const latest = versions.reduce((a, b) =>
+        Number(b.version) > Number(a.version) ? b : a
+      );
+      return res.json(latest);
+    }
+
+    const vNum = Number(versionQ);
+    if (!Number.isFinite(vNum) || vNum <= 0) {
+      return res.status(400).json({ error: "version tidak sah. Guna ?version=latest atau nombor." });
+    }
+
+    const found = versions.find((x) => Number(x.version) === vNum);
+    if (!found) {
+      return res.status(404).json({ error: "Versi CP tidak ditemui." });
+    }
+
+    return res.json(found);
+    });
 
 app.put("/api/cp/:sessionId/:cuId", async (req, res) => {
   try {
@@ -627,6 +645,272 @@ function getCardText(card) {
       card?.name ||
       ""
   ).trim();
+}
+
+/* ======================================================
+ * 3A) CP STORE (FASA 3)
+ * ====================================================== */
+const cpStore = {}; 
+// cpStore[sessionId][cuId] = { latestVersion: number, lockedVersion?: number, versions: { [v]: cpDoc } }
+
+/**
+ * Optional tetapi sangat membantu:
+ * Jika anda ada cpcStore sedia ada, pastikan ia boleh dicapai:
+ * globalThis.cpcStore = cpcStore;
+ * globalThis.sessions = sessions;
+ */
+
+/** util */
+function nowISO() {
+  return new Date().toISOString();
+}
+
+function normalizeLang(cpc) {
+  const lang = (cpc?.language || cpc?.bahasa || cpc?.lang || cpc?.data?.language || "").toString().trim();
+  return lang || "auto";
+}
+
+/**
+ * Ambil CPC ikut sessionId.
+ * - (A) guna globalThis.cpcStore jika ada
+ * - (B) fallback: jika CPC disimpan dalam sessions[sessionId].cpc
+ * - Jika tiada, throw
+ */
+function getCpcOrThrow(sessionId) {
+  const sid = String(sessionId || "").trim();
+  if (!sid) throw new Error("sessionId kosong");
+
+  // A) cpcStore (disyorkan)
+  if (globalThis.cpcStore && globalThis.cpcStore[sid]) return globalThis.cpcStore[sid];
+
+  // B) fallback jika anda simpan di sessions
+  if (globalThis.sessions && globalThis.sessions[sid] && globalThis.sessions[sid].cpc) {
+    return globalThis.sessions[sid].cpc;
+  }
+
+  // C) jika dalam kod anda ada variable cpcStore (tanpa globalThis), anda boleh set:
+  // globalThis.cpcStore = cpcStore;  <-- tambah 1 line sahaja
+
+  throw new Error(`CPC tidak dijumpai untuk session: ${sid}. Pastikan /api/cpc/${sid} berfungsi dan cpcStore di-expose ke globalThis.`);
+}
+
+/**
+ * Extract CU list dari CPC (kalis peluru)
+ */
+function extractCuList(cpc) {
+  if (!cpc) return [];
+  if (Array.isArray(cpc.cus)) return cpc.cus;
+  if (Array.isArray(cpc.units)) return cpc.units;
+  if (Array.isArray(cpc.competencyUnits)) return cpc.competencyUnits;
+
+  if (cpc.data) {
+    if (Array.isArray(cpc.data.cus)) return cpc.data.cus;
+    if (Array.isArray(cpc.data.units)) return cpc.data.units;
+    if (Array.isArray(cpc.data.competencyUnits)) return cpc.data.competencyUnits;
+  }
+
+  const terases = cpc.terases || cpc.terasList || cpc.teras || cpc.data?.terases || [];
+  const out = [];
+  for (const t of terases) {
+    const cuList = t.cus || t.cuList || t.units || t.competencyUnits || [];
+    for (const cu of cuList) out.push(cu);
+  }
+  return out;
+}
+
+function getCuId(cu, idx) {
+  return cu?.cuId || cu?.id || cu?.code || `C${String(idx + 1).padStart(2, "0")}`;
+}
+function getCuTitle(cu) {
+  return cu?.cuTitle || cu?.title || cu?.name || cu?.cuName || "";
+}
+function extractWaListFromCu(cu) {
+  return cu?.activities || cu?.waList || cu?.workActivities || cu?.was || cu?.wa || [];
+}
+function getWaId(wa, idx) {
+  return wa?.waId || wa?.id || wa?.code || `W${String(idx + 1).padStart(2, "0")}`;
+}
+function getWaTitle(wa) {
+  return wa?.waTitle || wa?.title || wa?.name || wa?.text || "";
+}
+
+/**
+ * Jana WS+PC minimum (3 steps) per WA.
+ * - PC ikut format Verb + Object + Qualifier (VOQ)
+ * - Flow lengkap: mula → proses → akhir
+ */
+function generateWsPcForWa({ lang, cuTitle, waTitle, waId }) {
+  const L = String(lang || "").toUpperCase();
+
+  // heuristik ringkas berdasarkan kata kunci WA (EN)
+  const t = String(waTitle || "").toLowerCase();
+
+  const isAnalyze = t.includes("analy");
+  const isPlan = t.includes("plan");
+  const isPerform = t.includes("perform") || t.includes("implement") || t.includes("execute");
+  const isEvaluate = t.includes("evaluat") || t.includes("review") || t.includes("assess");
+  const isPrepare = t.includes("prepare") || t.includes("generate") || t.includes("report");
+
+  // Template EN
+  const EN = () => {
+    if (isAnalyze) {
+      return [
+        {
+          wsText: `Identify required information and scope for ${waTitle}.`,
+          pcText: `Identify required information and scope for ${waTitle} according to organizational requirements.`,
+        },
+        {
+          wsText: `Review related policies, procedures, and references for ${waTitle}.`,
+          pcText: `Review related policies, procedures, and references to ensure ${waTitle} is compliant with guidelines.`,
+        },
+        {
+          wsText: `Confirm findings and document key requirements for follow-up action.`,
+          pcText: `Confirm findings and document key requirements in a complete and traceable manner for follow-up action.`,
+        },
+      ];
+    }
+    if (isPlan) {
+      return [
+        {
+          wsText: `Define objectives, resources, and timeline for ${waTitle}.`,
+          pcText: `Define objectives, resources, and timeline for ${waTitle} according to organizational constraints.`,
+        },
+        {
+          wsText: `Prepare required documents, tools, and approvals to support ${waTitle}.`,
+          pcText: `Prepare required documents, tools, and approvals to support ${waTitle} before execution.`,
+        },
+        {
+          wsText: `Finalize the plan and communicate responsibilities to relevant parties.`,
+          pcText: `Finalize the plan and communicate responsibilities clearly to ensure ${waTitle} can be executed effectively.`,
+        },
+      ];
+    }
+    if (isPerform) {
+      return [
+        {
+          wsText: `Prepare inputs and supporting documents before performing ${waTitle}.`,
+          pcText: `Prepare inputs and supporting documents to ensure ${waTitle} can be performed accurately.`,
+        },
+        {
+          wsText: `Execute tasks for ${waTitle} according to procedures and sequence.`,
+          pcText: `Execute tasks according to procedures and sequence to complete ${waTitle} within required standards.`,
+        },
+        {
+          wsText: `Record results and store evidence for ${waTitle}.`,
+          pcText: `Record results and store evidence in the designated system to ensure ${waTitle} is traceable and auditable.`,
+        },
+      ];
+    }
+    if (isEvaluate) {
+      return [
+        {
+          wsText: `Collect relevant data and outputs related to ${waTitle}.`,
+          pcText: `Collect relevant data and outputs to evaluate ${waTitle} against agreed criteria.`,
+        },
+        {
+          wsText: `Assess performance, accuracy, and compliance for ${waTitle}.`,
+          pcText: `Assess performance, accuracy, and compliance to ensure ${waTitle} meets organizational standards.`,
+        },
+        {
+          wsText: `Document findings and recommend corrective actions if required.`,
+          pcText: `Document findings and recommend corrective actions in a clear and actionable manner for improvement.`,
+        },
+      ];
+    }
+    if (isPrepare) {
+      return [
+        {
+          wsText: `Gather required records and data for ${waTitle}.`,
+          pcText: `Gather required records and data to prepare ${waTitle} in accordance with reporting requirements.`,
+        },
+        {
+          wsText: `Compile and format information to produce the ${waTitle}.`,
+          pcText: `Compile and format information to produce the ${waTitle} accurately and consistently.`,
+        },
+        {
+          wsText: `Review, approve, and submit the ${waTitle} to the designated party.`,
+          pcText: `Review, approve, and submit the ${waTitle} within the required timeline and distribution procedure.`,
+        },
+      ];
+    }
+
+    // default EN
+    return [
+      {
+        wsText: `Prepare requirements and inputs for ${waTitle}.`,
+        pcText: `Prepare requirements and inputs according to procedures to support ${waTitle}.`,
+      },
+      {
+        wsText: `Carry out activities to complete ${waTitle}.`,
+        pcText: `Carry out activities according to sequence and standards to complete ${waTitle}.`,
+      },
+      {
+        wsText: `Finalize outputs and record documentation for ${waTitle}.`,
+        pcText: `Finalize outputs and record documentation to ensure ${waTitle} is complete, traceable, and auditable.`,
+      },
+    ];
+  };
+
+  // Template BM (jika nanti CPC BM)
+  const BM = () => {
+    return [
+      {
+        wsText: `Kenal pasti keperluan dan input bagi ${waTitle}.`,
+        pcText: `Kenal pasti keperluan dan input bagi ${waTitle} mengikut prosedur dan keperluan organisasi.`,
+      },
+      {
+        wsText: `Laksanakan aktiviti untuk melengkapkan ${waTitle} mengikut turutan kerja.`,
+        pcText: `Laksanakan aktiviti mengikut turutan dan piawaian bagi memastikan ${waTitle} disiapkan dengan betul.`,
+      },
+      {
+        wsText: `Rekod hasil kerja dan simpan dokumen sokongan berkaitan ${waTitle}.`,
+        pcText: `Rekod hasil kerja dan simpan dokumen sokongan dalam sistem yang ditetapkan supaya ${waTitle} boleh dijejaki dan diaudit.`,
+      },
+    ];
+  };
+
+  const steps = (L === "BM" || L === "MS" || L === "MY") ? BM() : EN();
+
+  // Bentuk final: wsId + pcId
+  return steps.map((s, idx) => {
+    const n = String(idx + 1).padStart(2, "0");
+    return {
+      wsId: `${waId}-S${n}`,
+      wsText: s.wsText,
+      pcId: `${waId}-P${n}`,
+      pcText: s.pcText,
+    };
+  });
+}
+
+/**
+ * Validasi minimum (ikut LOCK Prof)
+ */
+function validateCpDraft(cpDoc) {
+  const errors = [];
+  const waList = cpDoc?.workActivities || [];
+
+  // WA min 3 (jika CPC ada >=3 — dalam data Office-v3 ada 5)
+  if (waList.length < 3) errors.push("WA kurang daripada 3 (minimum).");
+
+  // WS min 3 setiap WA, dan 1 PC setiap WS
+  for (const wa of waList) {
+    const steps = wa?.workSteps || [];
+    if (steps.length < 3) errors.push(`WS kurang daripada 3 untuk WA ${wa.waId}.`);
+    for (const st of steps) {
+      if (!String(st.pcText || "").trim()) errors.push(`PC tiada untuk WS ${st.wsId}.`);
+    }
+  }
+
+  return {
+    minWaOk: waList.length >= 3,
+    minWsOk: waList.every((w) => (w.workSteps || []).length >= 3),
+    pcPerWsOk: waList.every((w) => (w.workSteps || []).every((s) => String(s.pcText || "").trim())),
+    // pcVoqOk & flowOk boleh diperkemas kemudian (Phase validate)
+    pcVoqOk: true,
+    flowOk: true,
+    errors,
+  };
 }
 
 /* =========================
@@ -850,6 +1134,110 @@ app.post("/api/session/lock/:sessionId", (req, res) => {
     langLocked: true,
     lockedAt: s.lockedAt,
   });
+});
+
+/* ======================================================
+ * 3B) CP DRAFT GENERATOR
+ * ====================================================== */
+
+// POST /api/cp/draft
+// Body: { sessionId: "Office-v3", cuId: "C01" }
+app.post("/api/cp/draft", (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const cuIdReq = String(req.body?.cuId || "").trim();
+
+    if (!sessionId) return res.status(400).json({ error: "sessionId diperlukan" });
+    if (!cuIdReq) return res.status(400).json({ error: "cuId diperlukan" });
+
+    const cpc = getCpcOrThrow(sessionId);
+    const lang = normalizeLang(cpc);
+
+    const cuList = extractCuList(cpc);
+    if (!cuList.length) return res.status(404).json({ error: "Tiada CU dalam CPC untuk session ini" });
+
+    // cari CU (padankan cuId)
+    let foundCu = null;
+    let foundIdx = -1;
+    for (let i = 0; i < cuList.length; i++) {
+      const cu = cuList[i];
+      const cid = getCuId(cu, i);
+      if (String(cid).trim() === cuIdReq) {
+        foundCu = cu;
+        foundIdx = i;
+        break;
+      }
+    }
+    if (!foundCu) return res.status(404).json({ error: `CU tidak dijumpai dalam CPC: ${cuIdReq}` });
+
+    const cuId = getCuId(foundCu, foundIdx);
+    const cuTitle = getCuTitle(foundCu);
+
+    // WA WAJIB ikut CPC (tak ubah)
+    const waRaw = extractWaListFromCu(foundCu);
+    const waList = (waRaw || []).map((wa, idx) => ({
+      waId: getWaId(wa, idx),
+      waTitle: getWaTitle(wa),
+    }));
+
+    if (!waList.length) {
+      return res.status(400).json({ error: `CU ${cuId} tiada WA dalam CPC. Tidak boleh jana CP.` });
+    }
+
+    // Jana WS+PC min 3 setiap WA
+    const workActivities = waList.map((w) => {
+      const steps = generateWsPcForWa({
+        lang,
+        cuTitle,
+        waTitle: w.waTitle,
+        waId: w.waId,
+      });
+
+      return {
+        waId: w.waId,
+        waTitle: w.waTitle, // LOCK: ikut CPC
+        workSteps: steps,   // boleh edit kemudian dalam editor
+      };
+    });
+
+    // versioning
+    cpStore[sessionId] = cpStore[sessionId] || {};
+    const bucket = cpStore[sessionId][cuId] || { latestVersion: 0, versions: {} };
+    const nextV = (bucket.latestVersion || 0) + 1;
+
+    const cpDoc = {
+      sessionId,
+      cuId,
+      cuTitle,
+      language: lang,
+      status: "DRAFT",
+      version: nextV,
+      generatedAt: nowISO(),
+      source: {
+        cpcSessionId: sessionId,
+        cuTakenFromCpc: true,
+        waTakenFromCpc: true,
+      },
+      workActivities,
+    };
+
+    cpDoc.validation = validateCpDraft(cpDoc);
+
+    bucket.latestVersion = nextV;
+    bucket.versions[nextV] = cpDoc;
+    cpStore[sessionId][cuId] = bucket;
+
+    return res.json({
+      ok: true,
+      sessionId,
+      cuId,
+      version: nextV,
+      cp: cpDoc,
+      validation: cpDoc.validation,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
 });
 
 // Preview clustering (lite) – tanpa OpenAI
