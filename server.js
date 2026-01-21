@@ -1276,60 +1276,59 @@ app.get("/api/cpc/:sessionId", (req, res) => {
 
   const cards = getSessionCards(sessionId);
 
-// bina CU → WA (ikut struktur card sebenar: cuTitle + activity/name)
-const cuMap = {};
-cards.forEach((c, idx) => {
-  const cuTitle = String(c.cuTitle || "").trim();
-  const waTitle = String(c.activity || c.name || c.title || "").trim();
+  // bina CU → WA (ikut struktur card sebenar: cuTitle + activity/name)
+  const cuMap = {};
+  cards.forEach((c) => {
+    const cuTitle = String(c.cuTitle || "").trim();
+    const waTitle = String(c.activity || c.name || c.title || "").trim();
 
-  if (!cuTitle || !waTitle) return;
+    if (!cuTitle || !waTitle) return;
 
-  if (!cuMap[cuTitle]) {
-    cuMap[cuTitle] = {
-      cuCode: "",     // akan diisi semula
-      cuTitle,
-      wa: [],
-    };
-  }
+    if (!cuMap[cuTitle]) {
+      cuMap[cuTitle] = {
+        cuCode: "", // akan diisi semula
+        cuTitle,
+        wa: [],
+      };
+    }
 
-  // elak duplicate WA (berdasarkan tajuk)
-  const exists = cuMap[cuTitle].wa.some(
-    (w) => w.waTitle.toLowerCase() === waTitle.toLowerCase()
-  );
-  if (!exists) {
-    cuMap[cuTitle].wa.push({
-      waCode: "",
-      waTitle,
-    });
-  }
+    // elak duplicate WA (berdasarkan tajuk)
+    const exists = cuMap[cuTitle].wa.some(
+      (w) => String(w.waTitle || "").toLowerCase() === waTitle.toLowerCase()
+    );
+    if (!exists) {
+      cuMap[cuTitle].wa.push({
+        waCode: "",
+        waTitle,
+      });
+    }
+  });
+
+  // kemaskan kod CU & WA ikut format JPK (C01-W01)
+  const units = Object.values(cuMap).map((u, i) => ({
+    ...u,
+    cuCode: `C${String(i + 1).padStart(2, "0")}`,
+    wa: (u.wa || []).map((w, j) => ({
+      ...w,
+      waCode: `W${String(j + 1).padStart(2, "0")}`,
+    })),
+  }));
+
+  return res.json({
+    sessionId,
+    lang: String(s.lang || "MS").toUpperCase(),
+    generatedAt: new Date().toISOString(),
+
+    // struktur CPC
+    teras: [
+      {
+        terasCode: "T01",
+        terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
+      },
+    ],
+    units,
+  });
 });
-
-// REAL cluster RUN (OpenAI) — ikut bahasa session (MS/EN) + auto-lock
-app.post("/api/cluster/run", async (req, res) => {
-  try {
-    const sid = String(req.body?.sessionId || "").trim();
-    if (!sid) return res.status(400).json({ error: "sessionId diperlukan" });
-
-    // Pastikan session wujud
-    const s = ensureSession(sid);
-    if (!s) return res.status(400).json({ error: "sessionId tidak sah" });
-
-    const items = getSessionCards(sid);
-    if (items.length < 5) {
-      return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
-    }
-
-    if (!process.env.OPENAI_API_KEY) {
-      return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
-    }
-
-    const cards = items
-      .map((c) => ({ id: c.id, activity: getCardText(c) }))
-      .filter((c) => c.activity);
-
-    if (cards.length < 5) {
-      return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
-    }
 
     // =========================
     // Bahasa outcome ikut tetapan fasilitator
