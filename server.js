@@ -650,7 +650,6 @@ function getCardText(card) {
 /* ======================================================
  * 3A) CP STORE (FASA 3)
  * ====================================================== */
-const cpStore = {}; 
 // cpStore[sessionId][cuId] = { latestVersion: number, lockedVersion?: number, versions: { [v]: cpDoc } }
 
 /**
