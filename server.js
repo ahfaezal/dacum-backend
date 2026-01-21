@@ -155,11 +155,19 @@ function extractCusFromCpc(cpc) {
   return cus;
 }
 
-function findCuInCpc(cpc, cuId) {
-  const cus = extractCusFromCpc(cpc);
-  const target = String(cuId || "").trim().toLowerCase();
-  return cus.find((c) => String(c?.cuId || c?.id || "").trim().toLowerCase() === target) || null;
-}
+  function findCuInCpc(cpc, cuKey) {
+    const cus = extractCusFromCpc(cpc);
+    const target = String(cuKey || "").trim().toLowerCase();
+    if (!target) return null;
+
+    return (
+      cus.find((c) => {
+        const cuCode = String(c?.cuCode || c?.code || "").trim().toLowerCase();
+        const cuId = String(c?.cuId || c?.id || "").trim().toLowerCase();
+        return cuCode === target || cuId === target;
+      }) || null
+    );
+  }
 
 function extractWaFromCu(cu) {
   const wa = cu?.wa || cu?.workActivities || cu?.activities || cu?.was || [];
@@ -442,7 +450,7 @@ app.post("/api/cp/draft", async (req, res) => {
       return res.status(400).json({ error: "sessionId dan cuCode wajib." });
     }
 
-    const cpc = await fetchCpcJson(sessionId);
+    const cpc = await fetchCpcFinal(sessionId);
     const cuFromCpc = findCuInCpc(cpc, cuCode);
 
     if (!cuFromCpc) {
@@ -534,7 +542,7 @@ app.put("/api/cp/:sessionId/:cuId", async (req, res) => {
 app.post("/api/cp/validate", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
-    const cuId = String(req.body?.cuId || "").trim();
+    const cuId = String(req.body?.cuCode || req.body?.cuId || "").trim();
     const cp = req.body?.cp;
 
     if (!sessionId || !cuId || !cp) return res.status(400).json({ error: "sessionId, cuId, dan cp wajib." });
@@ -553,7 +561,7 @@ app.post("/api/cp/validate", async (req, res) => {
 app.post("/api/cp/lock", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
-    const cuId = String(req.body?.cuId || "").trim();
+    const cuId = String(req.body?.cuCode || req.body?.cuId || "").trim();
     const lockedBy = String(req.body?.lockedBy || "PANEL").trim();
 
     const latest = _getLatestCp(sessionId, cuId);
