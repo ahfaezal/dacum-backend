@@ -1304,7 +1304,7 @@ app.get("/api/cpc/:sessionId", (req, res) => {
     }
   });
 
-  // kemaskan kod CU & WA ikut format JPK (C01-W01)
+  // kemaskan kod CU & WA ikut format JPK (C01, W01)
   const units = Object.values(cuMap).map((u, i) => ({
     ...u,
     cuCode: `C${String(i + 1).padStart(2, "0")}`,
@@ -1314,24 +1314,25 @@ app.get("/api/cpc/:sessionId", (req, res) => {
     })),
   }));
 
-return res.json({
-  sessionId,
-  lang: String(s.lang || "MS").toUpperCase(),
-  generatedAt: new Date().toISOString(),
+  return res.json({
+    sessionId,
+    lang: String(s.lang || "MS").toUpperCase(),
+    generatedAt: new Date().toISOString(),
 
-  // struktur CPC
-  teras: [
-    {
-      terasCode: "T01",
-      terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
-    },
-  ],
+    // struktur CPC
+    teras: [
+      {
+        terasCode: "T01",
+        terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
+      },
+    ],
 
-  // ✅ alias untuk compatibility (CP Draft cari "cus")
-  cus: units,
+    // ✅ alias untuk compatibility (CP Draft cari "cus")
+    cus: units,
 
-  // asal
-  units,
+    // asal
+    units,
+  });
 });
 
     // =========================
