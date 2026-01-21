@@ -1314,20 +1314,24 @@ app.get("/api/cpc/:sessionId", (req, res) => {
     })),
   }));
 
-  return res.json({
-    sessionId,
-    lang: String(s.lang || "MS").toUpperCase(),
-    generatedAt: new Date().toISOString(),
+return res.json({
+  sessionId,
+  lang: String(s.lang || "MS").toUpperCase(),
+  generatedAt: new Date().toISOString(),
 
-    // struktur CPC
-    teras: [
-      {
-        terasCode: "T01",
-        terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
-      },
-    ],
-    units,
-  });
+  // struktur CPC
+  teras: [
+    {
+      terasCode: "T01",
+      terasTitle: s.terasTitle || "Pengurusan & Pengimarahan Masjid",
+    },
+  ],
+
+  // ✅ alias untuk compatibility (CP Draft cari "cus")
+  cus: units,
+
+  // asal
+  units,
 });
 
     // =========================
