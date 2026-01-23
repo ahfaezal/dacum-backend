@@ -496,31 +496,26 @@ Tiada teks lain selain JSON.
       return res.json({ ok: true, mode: "fallback_no_key", workActivities });
     }
 
-    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0.3,
-        messages: [{ role: "system", content: "JSON sahaja." }, prompt],
-      }),
-    });
+const out = await client.chat.completions.create({
+  model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+  temperature: 0.3,
+  response_format: { type: "json_object" },
+  messages: [
+    { role: "system", content: "JSON sahaja." },
+    prompt,
+  ],
+});
 
-    if (!aiResp.ok) {
-      const t = await aiResp.text().catch(() => "");
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({ ok: true, mode: "fallback_after_ai_fail", note: t, workActivities });
-    }
+const raw = out?.choices?.[0]?.message?.content || "{}";
 
-    const aiJson = await aiResp.json();
-    const text = aiJson?.choices?.[0]?.message?.content || "";
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch (e) {
+  const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+  return res.json({ ok: true, mode: "fallback_bad_json", note: raw, workActivities });
+}
 
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
     } catch (e) {
       const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
       return res.json({ ok: true, mode: "fallback_bad_json", note: text, workActivities });
@@ -654,112 +649,6 @@ function msImperative(wsEn = "") {
   if (s && !/[.!?]$/.test(s)) s += ".";
   return s || wsEn;
 }
-
-    // ---------- If no OpenAI key, return fallback ----------
-    if (!process.env.OPENAI_API_KEY) {
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({
-        ok: true,
-        mode: "fallback",
-        workActivities,
-      });
-    }
-
-    // ---------- AI mode ----------
-    // Jika server.js anda sudah ada OpenAI client, guna yang sedia ada.
-    // Kalau belum, anda boleh guna fetch ke OpenAI (tetapi pastikan dependensi tersedia).
-    // Di sini saya guna fetch (paling neutral).
-    const prompt = {
-      role: "user",
-      content: `
-Anda membantu membina CP (Competency Profile) untuk NOSS.
-CU: ${cuTitle} (${cuCode})
-Senarai WA:
-${waList.map((x, i) => `${i + 1}. ${x}`).join("\n")}
-
-Tugas:
-Untuk setiap WA, hasilkan ${wsPerWa} Work Steps (WS) dalam Bahasa Melayu (Malaysia), ringkas tetapi jelas, berbentuk tindakan.
-Setiap WS mesti ada:
-- wsNo (contoh "1.1")
-- wsText
-- pc: { verb, object, qualifier, pcText }  (pcText ayat penuh)
-
-Pulangkan JSON SAHAJA dengan format:
-{
-  "workActivities": [
-    {
-      "waTitle": "...",
-      "workSteps": [
-        { "wsNo":"1.1", "wsText":"...", "pc":{"verb":"...","object":"...","qualifier":"...","pcText":"..."} }
-      ]
-    }
-  ]
-}
-Tiada teks lain selain JSON.
-      `.trim(),
-    };
-
-async function callOpenAI(prompt) {
-  const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      temperature: 0.3,
-      messages: [
-        { role: "system", content: "Anda penulis standard kerja NOSS. Jawab dalam BM Malaysia. JSON sahaja." },
-        prompt,
-      ],
-    }),
-  });
-
-  return aiResp.json();
-}
-
-    if (!aiResp.ok) {
-      const t = await aiResp.text().catch(() => "");
-      // fallback bila AI fail
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({ ok: true, mode: "fallback_after_ai_fail", note: t, workActivities });
-    }
-
-    const aiJson = await aiResp.json();
-    const text = aiJson?.choices?.[0]?.message?.content || "";
-
-    let parsed;
-    try {
-      parsed = JSON.parse(text);
-    } catch (e) {
-      // fallback bila AI pulang bukan JSON
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({ ok: true, mode: "fallback_after_bad_json", raw: text, workActivities });
-    }
-
-    // normalise output
-    const workActivities = (parsed.workActivities || []).map((wa, idx) => ({
-      waId: "",
-      waTitle: String(wa?.waTitle || waList[idx] || `WA${idx + 1}`),
-      workSteps: (wa?.workSteps || []).map((ws, j) => ({
-        wsId: "",
-        wsNo: String(ws?.wsNo || `${idx + 1}.${j + 1}`),
-        wsText: String(ws?.wsText || "").trim(),
-        pc: {
-          verb: String(ws?.pc?.verb || "").trim(),
-          object: String(ws?.pc?.object || "").trim(),
-          qualifier: String(ws?.pc?.qualifier || "").trim(),
-          pcText: String(ws?.pc?.pcText || "").trim(),
-        },
-      })),
-    }));
-
-    return res.json({ ok: true, mode: "ai", workActivities });
-  } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
-  }
-});
 
 /* ======================================================
  * 3) AI CLUSTER (PREVIEW + REAL)
