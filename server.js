@@ -1266,30 +1266,38 @@ function generateCpDraft({ sessionId, cpc, cu }) {
     workActivities: waList.map((wa, i) => {
       const templates = lang === "MS" ? waTemplatesForMS(wa.waTitle) : waTemplatesForEN(wa.waTitle);
 
-      const workSteps = templates.map((tpl, idx) => {
-        const wsNo = `${i + 1}.${idx + 1}`;
-        return {
-          wsId: `${wa.waId || `WA${i + 1}`}-S${idx + 1}`,
-          wsNo,
-          wsText: tpl.ws,
-      const pcAuto =
-        lang === "MS"
-          ? buildPcMS({ wsText: tpl.ws })
-          : {
-              verb: tpl.verb,
-              object: tpl.object,
-              qualifier: tpl.qualifier,
-              pcText: makePcText({ lang, verb: tpl.verb, object: tpl.object, qualifier: tpl.qualifier }),
-            };
+const workSteps = templates.map((tpl, idx) => {
+  const wsNo = `${i + 1}.${idx + 1}`;
 
-      pc: {
-        verb: pcAuto.verb,
-        object: pcAuto.object,
-        qualifier: pcAuto.qualifier,
-        pcText: pcAuto.pcText,
-      },
+  const pcAuto =
+    lang === "MS"
+      ? buildPcMS({ wsText: tpl.ws })
+      : {
+          verb: tpl.verb,
+          object: tpl.object,
+          qualifier: tpl.qualifier,
+          pcText: makePcText({
+            lang,
+            verb: tpl.verb,
+            object: tpl.object,
+            qualifier: tpl.qualifier,
+          }),
         };
-      });
+
+  return {
+    wsId: `${wa.waId || `WA${i + 1}`}-S${idx + 1}`,
+    wsNo,
+    wsText: tpl.ws,
+    pc: {
+      pcId: `${wa.waId || `WA${i + 1}`}-P${idx + 1}`,
+      pcNo: wsNo,
+      verb: pcAuto.verb,
+      object: pcAuto.object,
+      qualifier: pcAuto.qualifier,
+      pcText: pcAuto.pcText,
+    },
+  };
+});
 
       return {
         waId: wa.waId || `W${String(i + 1).padStart(2, "0")}`,
