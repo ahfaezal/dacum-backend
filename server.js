@@ -1166,6 +1166,88 @@ function waTemplatesForMS(waTitle) {
   ];
 }
 
+/**
+ * ===============================
+ * RULE ENGINE: Performance Criteria (PC)
+ * Regulator / JPK Style
+ * ===============================
+ */
+function buildPcMS({ wsText = "", context = {} }) {
+  const t = wsText.toLowerCase();
+
+  // Default qualifier (paling selamat)
+  let qualifier = "mengikut tatacara yang ditetapkan";
+
+  // RULE: waktu solat
+  if (t.includes("waktu solat")) {
+    qualifier = "berdasarkan jadual waktu solat";
+  }
+
+  // RULE: wuduk
+  else if (t.includes("wuduk")) {
+    qualifier = "mengikut tatacara wuduk yang ditetapkan";
+  }
+
+  // RULE: pakaian imam
+  else if (t.includes("pakaian")) {
+    qualifier = "berdasarkan ketetapan yang ditetapkan";
+  }
+
+  // RULE: saf / jemaah
+  else if (t.includes("saf") || t.includes("jemaah")) {
+    qualifier = "mengikut susunan saf solat berjemaah";
+  }
+
+  // RULE: arahan / penyampaian
+  else if (t.includes("arahan") || t.includes("sampaikan")) {
+    qualifier = "disampaikan kepada jemaah dengan jelas";
+  }
+
+  // RULE: pelaksanaan solat
+  else if (t.includes("laksana") || t.includes("imamkan")) {
+    qualifier = "mengikut tatacara solat yang ditetapkan";
+  }
+
+  // RULE: wirid / doa
+  else if (t.includes("wirid") || t.includes("doa")) {
+    qualifier = "mengikut doa yang ditetapkan";
+  }
+
+  // Tentukan verb pasif
+  let verb = "dilaksanakan";
+  if (t.includes("kenal pasti")) verb = "ditentukan";
+  else if (t.includes("ambil")) verb = "diambil";
+  else if (t.includes("pakai")) verb = "dipakai";
+  else if (t.includes("ambil tempat")) verb = "dikenal pasti";
+  else if (t.includes("sampaikan")) verb = "disampaikan";
+  else if (t.includes("baca")) verb = "dibaca";
+  else if (t.includes("laksana") || t.includes("imamkan")) verb = "dilaksanakan";
+
+  // Object = buang kata kerja depan
+  const object = wsText
+    .replace(/^kenal pasti/i, "")
+    .replace(/^ambil/i, "")
+    .replace(/^pakai/i, "")
+    .replace(/^ambil tempat/i, "")
+    .replace(/^sampaikan/i, "")
+    .replace(/^laksana/i, "")
+    .replace(/^imamkan/i, "")
+    .replace(/^baca/i, "")
+    .trim();
+
+  return {
+    verb,
+    object,
+    qualifier,
+    pcText: `${object} telah ${verb} ${qualifier}.`
+      .replace(/\s+/g, " ")
+      .trim(),
+  };
+}
+
+// ===============================
+// CP Draft Generator
+// ===============================
 function generateCpDraft({ sessionId, cpc, cu }) {
   const lang = detectLanguageFromCpc(cpc); // "EN"|"MS"
   const waList = extractWaFromCu(cu);
@@ -1190,14 +1272,22 @@ function generateCpDraft({ sessionId, cpc, cu }) {
           wsId: `${wa.waId || `WA${i + 1}`}-S${idx + 1}`,
           wsNo,
           wsText: tpl.ws,
-          pc: {
-            pcId: `${wa.waId || `WA${i + 1}`}-P${idx + 1}`,
-            pcNo: wsNo,
-            verb: tpl.verb,
-            object: tpl.object,
-            qualifier: tpl.qualifier,
-            pcText: makePcText({ lang, verb: tpl.verb, object: tpl.object, qualifier: tpl.qualifier }),
-          },
+      const pcAuto =
+        lang === "MS"
+          ? buildPcMS({ wsText: tpl.ws })
+          : {
+              verb: tpl.verb,
+              object: tpl.object,
+              qualifier: tpl.qualifier,
+              pcText: makePcText({ lang, verb: tpl.verb, object: tpl.object, qualifier: tpl.qualifier }),
+            };
+
+      pc: {
+        verb: pcAuto.verb,
+        object: pcAuto.object,
+        qualifier: pcAuto.qualifier,
+        pcText: pcAuto.pcText,
+      },
         };
       });
 
