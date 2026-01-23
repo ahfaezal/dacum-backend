@@ -515,12 +515,7 @@ try {
   const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
   return res.json({ ok: true, mode: "fallback_bad_json", note: raw, workActivities });
 }
-
-    } catch (e) {
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({ ok: true, mode: "fallback_bad_json", note: text, workActivities });
-    }
-
+    
     const workActivities = Array.isArray(parsed?.workActivities) ? parsed.workActivities : [];
 
     // Post-process: pastify pcText (kalau AI bagi EN / bukan past tense)
