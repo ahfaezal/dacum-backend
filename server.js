@@ -337,49 +337,36 @@ app.get("/api/session/cus", (req, res) => {
 // CP AI: Seed Work Steps (WS) + Performance Criteria (PC)
 // POST /api/cp/ai/seed-ws
 // Body: { sessionId, cuCode, cuTitle, waList: [string], wsPerWa?: number }
-// Return: { workActivities: [...] }
 // ======================================================
 app.post("/api/cp/ai/seed-ws", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
-    const cuCode = String(req.body?.cuCode || req.body?.cuId || "")
-      .trim()
-      .toLowerCase();
+    const cuCode = String(req.body?.cuCode || req.body?.cuId || "").trim().toLowerCase();
     const cuTitle = String(req.body?.cuTitle || "").trim();
     const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
     const wsPerWa = Math.min(7, Math.max(3, Number(req.body?.wsPerWa || 5)));
 
     if (!sessionId || !cuCode) {
-      return res.status(400).json({ error: "sessionId / cuCode tidak sah" });
+      return res.status(400).json({ ok: false, error: "sessionId / cuCode tidak sah" });
     }
     if (!waList.length) {
-      return res.status(400).json({ error: "waList kosong (tiada WA)" });
+      return res.status(400).json({ ok: false, error: "waList kosong (tiada WA)" });
     }
 
-    // ambil config session (lang)
-    const s = ensureSession(sessionId);
-    const lang = String(s?.lang || "MS").toUpperCase(); // "MS" | "EN"
-
     // ===============================
-    // Helpers: clean + EN -> MS past/outcome
+    // EN -> MS (rules ringan, stabil)
     // ===============================
-    function cleanFirstPerson(str = "") {
-      return String(str)
-        .replace(/\b(I|We|Our|Ours|Me|My|Mine|Us)\b/gi, "")
-        .replace(/\b(saya|kami|kita|aku|milik saya|milik kami)\b/gi, "")
+    function cleanFirstPerson(s = "") {
+      return String(s)
+        .replace(/\b(I|We|Our|Ours|Me|My)\b/gi, "")
         .replace(/\s{2,}/g, " ")
         .trim();
     }
 
-    // tukar PC EN (passive past) -> BM outcome ringkas
     function msPastify(pcEn = "") {
-      let t = cleanFirstPerson(pcEn);
+      let s = cleanFirstPerson(pcEn);
 
-      // buang permulaan yang pelik
-      t = t.replace(/^[\-\*\u2022]+\s*/g, "").trim();
-
-      // core passive/past patterns
-      t = t
+      s = s
         .replace(/\bhas been identified\b/gi, "telah dikenalpasti")
         .replace(/\bhave been identified\b/gi, "telah dikenalpasti")
         .replace(/\bwas identified\b/gi, "telah dikenalpasti")
@@ -419,67 +406,43 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
         .replace(/\bwas reviewed\b/gi, "telah disemak")
         .replace(/\bwere reviewed\b/gi, "telah disemak");
 
-      // frasa umum
-      t = t
+      s = s
         .replace(/\bin accordance with\b/gi, "berdasarkan")
         .replace(/\bas per\b/gi, "mengikut")
         .replace(/\baccording to\b/gi, "berdasarkan")
-        .replace(/\bin the specified system\b/gi, "dalam sistem yang ditetapkan")
-        .replace(/\bin the system specified\b/gi, "dalam sistem yang ditetapkan");
+        .replace(/\bin the (system|systems) specified\b/gi, "dalam sistem yang ditetapkan")
+        .replace(/\bin the specified system\b/gi, "dalam sistem yang ditetapkan");
 
-      t = t.replace(/\s{2,}/g, " ").trim();
-      if (t && !/[.!?]$/.test(t)) t += ".";
-      return t;
-    }
-
-    // ===============================
-    // Helpers: bina PC BM past/outcome dari (verb, object, qualifier)
-    // (untuk fallback/repair bila AI degil)
-    // ===============================
-    function verbToPassiveMs(verbRaw = "") {
-      const v = String(verbRaw || "").trim().toLowerCase();
-      const map = {
-        "kenal pasti": "dikenalpasti",
-        kenalpasti: "dikenalpasti",
-        rekod: "direkodkan",
-        catat: "dicatat",
-        baca: "dibaca",
-        periksa: "diperiksa",
-        semak: "disemak",
-        sediakan: "disediakan",
-        buat: "dibuat",
-        laksana: "dilaksanakan",
-        analisis: "dianalisis",
-        nilai: "dinilai",
-        siasat: "disiasat",
-        hantar: "dihantar",
-        salur: "disalurkan",
-      };
-      if (map[v]) return map[v];
-      if (v.startsWith("di")) return v; // dah passive
-      return "dilaksanakan";
-    }
-
-    function buildPastPcTextMs(verb, object, qualifier) {
-      const obj = String(object || "").trim() || "Aktiviti kerja";
-      const qual = String(qualifier || "").trim();
-      const passive = verbToPassiveMs(verb);
-      let s = `${obj} telah ${passive}`;
-      if (qual) s += ` ${qual}`;
-      if (!/[.!?]$/.test(s)) s += ".";
+      s = s.replace(/\s{2,}/g, " ").trim();
+      if (s && !/[.!?]$/.test(s)) s += ".";
       return s;
     }
 
-    // ===============================
-    // Fallback generator (no AI) — WS arahan, PC outcome (past tense)
-    // ===============================
+    // ----------------------------
+    // Fallback generator (no AI)
+    // ----------------------------
     function fallbackSeed(waTitle, idx) {
       const base = [
-        { ws: "Kenal pasti keperluan dan persediaan awal.", verb: "kenal pasti", object: "Keperluan dan persediaan awal", qualifier: "berdasarkan keperluan operasi" },
-        { ws: "Sediakan peralatan dan bahan mengikut SOP.", verb: "sediakan", object: "Peralatan dan bahan", qualifier: "mengikut prosedur operasi standard yang ditetapkan" },
-        { ws: "Laksanakan langkah kerja mengikut turutan.", verb: "laksana", object: "Langkah kerja", qualifier: "mengikut turutan yang ditetapkan" },
-        { ws: "Semak hasil kerja dan buat pembetulan jika perlu.", verb: "semak", object: "Hasil kerja", qualifier: "bagi memastikan pematuhan keperluan" },
-        { ws: "Rekod dan laporkan pelaksanaan.", verb: "rekod", object: "Pelaksanaan kerja", qualifier: "mengikut sistem pelaporan yang ditetapkan" },
+        {
+          ws: "Kenal pasti keperluan dan persediaan awal.",
+          pc: "Keperluan dan persediaan awal telah dikenalpasti berdasarkan keperluan operasi.",
+        },
+        {
+          ws: "Sediakan peralatan dan bahan mengikut SOP.",
+          pc: "Peralatan dan bahan telah disediakan mengikut prosedur operasi standard yang ditetapkan.",
+        },
+        {
+          ws: "Laksanakan langkah kerja mengikut turutan.",
+          pc: "Langkah kerja telah dilaksanakan mengikut turutan yang ditetapkan dengan tepat.",
+        },
+        {
+          ws: "Semak hasil kerja dan buat pembetulan jika perlu.",
+          pc: "Hasil kerja telah disemak dan pembetulan dibuat bagi memastikan pematuhan keperluan.",
+        },
+        {
+          ws: "Rekod dan laporkan pelaksanaan.",
+          pc: "Pelaksanaan kerja telah direkod dan dilaporkan mengikut sistem pelaporan yang ditetapkan.",
+        },
       ].slice(0, wsPerWa);
 
       return {
@@ -490,163 +453,114 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
           wsNo: `${idx + 1}.${i + 1}`,
           wsText: item.ws,
           pc: {
-            verb: item.verb,
-            object: item.object,
-            qualifier: item.qualifier,
-            pcText: buildPastPcTextMs(item.verb, item.object, item.qualifier),
+            verb: "",
+            object: "",
+            qualifier: "",
+            pcText: item.pc, // ✅ past tense, outcome-based
           },
         })),
       };
     }
 
-    // ===============================
-    // AI path (jika ada OpenAI client dalam projek)
-    // - Kita guna prompt EN untuk enforce "passive past"
-    // - Lepas tu convert -> BM outcome (msPastify)
-    // ===============================
-    async function tryAiSeed() {
-      // Jika projek Prof ada util openai, letak call di sini.
-      // Saya cuba guna global `openai` jika wujud.
-      if (!globalThis.openai || !process.env.OPENAI_API_KEY) return null;
+    // ----------------------------
+    // AI call (optional)
+    // ----------------------------
+    const prompt = {
+      role: "user",
+      content: `
+Anda penulis standard kerja NOSS. Hasilkan WS dan PC (past tense, outcome-based) dalam Bahasa Malaysia.
+Pastikan PC menunjukkan hasil WS, bukan arahan.
 
-      const waClean = waList.map((x) => String(x || "").trim()).filter(Boolean);
+CU: ${cuCode} — ${cuTitle}
+WA List:
+${waList.map((x, i) => `${i + 1}) ${x}`).join("\n")}
 
-      const prompt = `
-You are generating Competency Profile details.
-
-Return STRICT JSON only (no markdown, no commentary).
-For each Work Activity (WA), generate ${wsPerWa} Work Steps (WS) and Performance Criteria (PC).
-
-Rules:
-- WS must be Malay (BM), imperative/action instruction.
-- PC must be English, outcome-based, passive past tense (e.g., "Revenue sources have been identified based on financial reports.").
-- PC must reflect the WS result, NOT an instruction.
-- PC must NOT contain any first-person words (I, we, our, my).
-- Keep sentences short, clear, auditable.
-
-Output schema:
+Pulangkan JSON SAHAJA dengan format:
 {
   "workActivities": [
     {
-      "waTitle": "string",
+      "waTitle": "...",
       "workSteps": [
-        {
-          "wsText": "BM imperative",
-          "pcTextEn": "EN passive past outcome",
-          "verb": "BM verb (optional)",
-          "object": "BM object (optional)",
-          "qualifier": "BM qualifier (optional)"
-        }
+        { "wsNo":"1.1", "wsText":"...", "pc":{ "verb":"...", "object":"...", "qualifier":"...", "pcText":"..." } }
       ]
     }
   ]
 }
+Tiada teks lain selain JSON.
+`.trim(),
+    };
 
-Context:
-CU: ${cuCode} - ${cuTitle || ""}
-WA List: ${JSON.stringify(waClean)}
-      `.trim();
+    // Jika tiada API key, terus fallback (supaya deploy tak fail)
+    if (!process.env.OPENAI_API_KEY) {
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({ ok: true, mode: "fallback_no_key", workActivities });
+    }
 
-      // ✅ Contoh panggilan untuk OpenAI SDK moden.
-      // Jika projek Prof guna cara lain, ubah sedikit di sini sahaja.
-      const resp = await globalThis.openai.chat.completions.create({
+    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
         model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        temperature: 0.2,
-        messages: [{ role: "user", content: prompt }],
-      });
+        temperature: 0.3,
+        messages: [{ role: "system", content: "JSON sahaja." }, prompt],
+      }),
+    });
 
-      const raw = resp?.choices?.[0]?.message?.content || "";
-      const json = JSON.parse(raw);
-
-      // normalize output
-      const workActivities = Array.isArray(json?.workActivities) ? json.workActivities : [];
-      return workActivities;
+    if (!aiResp.ok) {
+      const t = await aiResp.text().catch(() => "");
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({ ok: true, mode: "fallback_after_ai_fail", note: t, workActivities });
     }
 
-    let workActivitiesAi = null;
+    const aiJson = await aiResp.json();
+    const text = aiJson?.choices?.[0]?.message?.content || "";
+
+    let parsed;
     try {
-      workActivitiesAi = await tryAiSeed();
+      parsed = JSON.parse(text);
     } catch (e) {
-      // kalau AI fail, kita fallback
-      workActivitiesAi = null;
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({ ok: true, mode: "fallback_bad_json", note: text, workActivities });
     }
 
-    // ===============================
-    // Build final workActivities
-    // - jika AI ada: convert pcTextEn -> BM past/outcome
-    // - jika tiada AI: fallbackSeed
-    // ===============================
-    const finalWorkActivities = (workActivitiesAi && workActivitiesAi.length
-      ? workActivitiesAi.map((wa, waIdx) => {
-          const title = String(wa?.waTitle || waList[waIdx] || `WA${waIdx + 1}`).trim();
+    const workActivities = Array.isArray(parsed?.workActivities) ? parsed.workActivities : [];
 
-          const steps = Array.isArray(wa?.workSteps) ? wa.workSteps : [];
-          const fixedSteps = steps.slice(0, wsPerWa).map((x, i) => {
-            const wsText = String(x?.wsText || "").trim() || `Laksanakan kerja bagi ${title}.`;
-            const pcEn = String(x?.pcTextEn || "").trim();
-
-            const verb = String(x?.verb || "").trim();
-            const object = String(x?.object || "").trim();
-            const qualifier = String(x?.qualifier || "").trim();
-
-            // Convert EN->MS
-            let pcMs = msPastify(pcEn);
-
-            // REPAIR jika kosong / masih arahan / ada first-person / tak jadi outcome
-            const looksImperative =
-              /^(kenal pasti|rekod|catat|baca|periksa|semak|sediakan|buat|laksana|analisis|nilai|hantar|salur)\b/i.test(pcMs) ||
-              /^(identify|record|check|review|prepare|conduct|analyze|assess)\b/i.test(pcEn);
-
-            const hasFirstPerson = /\b(I|We|Our|My|Saya|Kami|Kita)\b/i.test(pcEn) || /\b(Saya|Kami|Kita)\b/i.test(pcMs);
-
-            if (!pcMs || looksImperative || hasFirstPerson) {
-              // bina semula guna BM (kalau ada verb/object/qualifier), kalau tak ada, guna wsText untuk object ringkas
-              const objFallback = object || wsText.replace(/\.$/, "");
-              pcMs = buildPastPcTextMs(verb || "laksana", objFallback, qualifier || "mengikut keperluan yang ditetapkan");
-            }
+    // Post-process: pastify pcText (kalau AI bagi EN / bukan past tense)
+    const normalized = workActivities.map((wa, waIdx) => ({
+      waId: "",
+      waTitle: String(wa?.waTitle || waList[waIdx] || `WA${waIdx + 1}`).trim(),
+      workSteps: Array.isArray(wa?.workSteps)
+        ? wa.workSteps.slice(0, wsPerWa).map((ws, i) => {
+            const pcTextRaw = String(ws?.pc?.pcText || "").trim();
+            // jika nampak english passive, convert; kalau sudah BM elok, biar
+            const pcText = /has been|have been|was |were |in accordance with|according to/i.test(pcTextRaw)
+              ? msPastify(pcTextRaw)
+              : (pcTextRaw && !/[.!?]$/.test(pcTextRaw) ? pcTextRaw + "." : pcTextRaw);
 
             return {
               wsId: "",
-              wsNo: `${waIdx + 1}.${i + 1}`,
-              wsText,
+              wsNo: ws?.wsNo || `${waIdx + 1}.${i + 1}`,
+              wsText: String(ws?.wsText || "").trim(),
               pc: {
-                verb: verb || "",
-                object: object || "",
-                qualifier: qualifier || "",
-                pcText: pcMs,
+                verb: String(ws?.pc?.verb || "").trim(),
+                object: String(ws?.pc?.object || "").trim(),
+                qualifier: String(ws?.pc?.qualifier || "").trim(),
+                pcText: pcText || fallbackSeed("", waIdx).workSteps[i]?.pc?.pcText || "",
               },
             };
-          });
+          })
+        : fallbackSeed("", waIdx).workSteps,
+    }));
 
-          // kalau AI tak bagi steps, fallback untuk WA ini
-          if (!fixedSteps.length) {
-            return fallbackSeed(title, waIdx);
-          }
-
-          return {
-            waId: "",
-            waTitle: title,
-            workSteps: fixedSteps,
-          };
-        })
-      : waList.map((t, i) => fallbackSeed(String(t || "").trim(), i))
-    );
-
-    // ===============================
-    // Kalau session lang = EN dan Prof nak PC kekal EN:
-    // (optional) — buat masa ini kita kekalkan MS outcome untuk stabil.
-    // ===============================
-    return res.json({
-      ok: true,
-      sessionId,
-      cuCode,
-      lang,
-      workActivities: finalWorkActivities,
-    });
+    return res.json({ ok: true, mode: "ai", workActivities: normalized });
   } catch (e) {
-    return res.status(500).json({ error: String(e?.message || e) });
+    return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
+
 
 // ===============================
 // EN -> MS (rules ringan, stabil)
