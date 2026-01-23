@@ -1245,6 +1245,69 @@ function buildPcMS({ wsText = "", context = {} }) {
   };
 }
 
+function padWorkStepsToMin({
+  lang,
+  wa,
+  waIndex,
+  workSteps,
+  minWS = 3,
+}) {
+  const out = Array.isArray(workSteps) ? [...workSteps] : [];
+  const missing = Math.max(0, minWS - out.length);
+  if (!missing) return out;
+
+  // WS tambahan yang selamat & generik (regulator-friendly)
+  const extraMs = [
+    "Semak pematuhan dokumen/rekod yang disediakan.",
+    "Failkan dan kemas kini rekod dalam sistem yang ditetapkan.",
+  ];
+  const extraEn = [
+    "Verify outputs and compliance against requirements.",
+    "File and update records in the designated system.",
+  ];
+
+  const extras = lang === "MS" ? extraMs : extraEn;
+
+  for (let k = 0; k < missing; k++) {
+    const idx = out.length; // indeks baru dalam array
+    const wsNo = `${waIndex + 1}.${idx + 1}`;
+    const wsText = extras[Math.min(k, extras.length - 1)];
+
+    let pcAuto;
+    if (lang === "MS") {
+      pcAuto = buildPcMS({ wsText });
+    } else {
+      // fallback EN (VOC kosong pun ok, tapi lebih baik isi)
+      const verb = "verified";
+      const object = "Outputs and compliance";
+      const qualifier = "against requirements and procedures";
+      pcAuto = {
+        verb,
+        object,
+        qualifier,
+        pcText: makePcText({ lang: "EN", verb, object, qualifier }),
+      };
+    }
+
+    out.push({
+      wsId: `${wa?.waId || `WA${waIndex + 1}`}-S${idx + 1}`,
+      wsNo,
+      wsText,
+      pc: {
+        pcId: `${wa?.waId || `WA${waIndex + 1}`}-P${idx + 1}`,
+        pcNo: wsNo,
+        verb: pcAuto.verb,
+        object: pcAuto.object,
+        qualifier: pcAuto.qualifier,
+        pcText: pcAuto.pcText,
+      },
+    });
+  }
+
+  return out;
+}
+
+
 // ===============================
 // CP Draft Generator
 // ===============================
@@ -1294,12 +1357,20 @@ const workSteps = templates.map((tpl, idx) => {
   };
 });
 
-      return {
-        waId: wa.waId || `W${String(i + 1).padStart(2, "0")}`,
-        waCode: wa.waCode || wa.waId || "",
-        waTitle: wa.waTitle || "",
-        workSteps,
-      };
+let workStepsPadded = padWorkStepsToMin({
+  lang,
+  wa,
+  waIndex: i,
+  workSteps,
+  minWS: 3,
+});
+
+return {
+  waId: wa.waId || `W${String(i + 1).padStart(2, "0")}`,
+  waCode: wa.waCode || wa.waId || "",
+  waTitle: wa.waTitle || "",
+  workSteps: workStepsPadded,
+};
     }),
     validation: { minRulesPassed: false, vocPassed: false, completenessPassed: false, issues: [] },
     audit: { createdAt: nowISO(), createdBy: "AI", updatedAt: nowISO(), updatedBy: ["AI"], lockedAt: null, lockedBy: null },
