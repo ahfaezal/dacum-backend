@@ -337,11 +337,14 @@ app.get("/api/session/cus", (req, res) => {
 // CP AI: Seed Work Steps (WS) + Performance Criteria (PC)
 // POST /api/cp/ai/seed-ws
 // Body: { sessionId, cuCode, cuTitle, waList: [string], wsPerWa?: number }
+// Return: { workActivities: [...] }
 // ======================================================
 app.post("/api/cp/ai/seed-ws", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
-    const cuCode = String(req.body?.cuCode || req.body?.cuId || "").trim().toLowerCase();
+    const cuCode = String(req.body?.cuCode || req.body?.cuId || "")
+      .trim()
+      .toLowerCase();
     const cuTitle = String(req.body?.cuTitle || "").trim();
     const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
     const wsPerWa = Math.min(7, Math.max(3, Number(req.body?.wsPerWa || 5)));
@@ -353,45 +356,390 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
       return res.status(400).json({ error: "waList kosong (tiada WA)" });
     }
 
-    // ---------- Fallback generator (no AI) ----------
-    function verbToPassive(verbRaw) {
+    // ambil config session (lang)
+    const s = ensureSession(sessionId);
+    const lang = String(s?.lang || "MS").toUpperCase(); // "MS" | "EN"
+
+    // ===============================
+    // Helpers: clean + EN -> MS past/outcome
+    // ===============================
+    function cleanFirstPerson(str = "") {
+      return String(str)
+        .replace(/\b(I|We|Our|Ours|Me|My|Mine|Us)\b/gi, "")
+        .replace(/\b(saya|kami|kita|aku|milik saya|milik kami)\b/gi, "")
+        .replace(/\s{2,}/g, " ")
+        .trim();
+    }
+
+    // tukar PC EN (passive past) -> BM outcome ringkas
+    function msPastify(pcEn = "") {
+      let t = cleanFirstPerson(pcEn);
+
+      // buang permulaan yang pelik
+      t = t.replace(/^[\-\*\u2022]+\s*/g, "").trim();
+
+      // core passive/past patterns
+      t = t
+        .replace(/\bhas been identified\b/gi, "telah dikenalpasti")
+        .replace(/\bhave been identified\b/gi, "telah dikenalpasti")
+        .replace(/\bwas identified\b/gi, "telah dikenalpasti")
+        .replace(/\bwere identified\b/gi, "telah dikenalpasti")
+
+        .replace(/\bhas been recorded\b/gi, "telah direkodkan")
+        .replace(/\bhave been recorded\b/gi, "telah direkodkan")
+        .replace(/\bwas recorded\b/gi, "telah direkodkan")
+        .replace(/\bwere recorded\b/gi, "telah direkodkan")
+
+        .replace(/\bhas been analysed\b/gi, "telah dianalisis")
+        .replace(/\bhave been analysed\b/gi, "telah dianalisis")
+        .replace(/\bwas analysed\b/gi, "telah dianalisis")
+        .replace(/\bwere analysed\b/gi, "telah dianalisis")
+        .replace(/\bhas been analyzed\b/gi, "telah dianalisis")
+        .replace(/\bhave been analyzed\b/gi, "telah dianalisis")
+        .replace(/\bwas analyzed\b/gi, "telah dianalisis")
+        .replace(/\bwere analyzed\b/gi, "telah dianalisis")
+
+        .replace(/\bhas been prepared\b/gi, "telah disediakan")
+        .replace(/\bhave been prepared\b/gi, "telah disediakan")
+        .replace(/\bwas prepared\b/gi, "telah disediakan")
+        .replace(/\bwere prepared\b/gi, "telah disediakan")
+
+        .replace(/\bhas been conducted\b/gi, "telah dilaksanakan")
+        .replace(/\bhave been conducted\b/gi, "telah dilaksanakan")
+        .replace(/\bwas conducted\b/gi, "telah dilaksanakan")
+        .replace(/\bwere conducted\b/gi, "telah dilaksanakan")
+
+        .replace(/\bhas been verified\b/gi, "telah disahkan")
+        .replace(/\bhave been verified\b/gi, "telah disahkan")
+        .replace(/\bwas verified\b/gi, "telah disahkan")
+        .replace(/\bwere verified\b/gi, "telah disahkan")
+
+        .replace(/\bhas been reviewed\b/gi, "telah disemak")
+        .replace(/\bhave been reviewed\b/gi, "telah disemak")
+        .replace(/\bwas reviewed\b/gi, "telah disemak")
+        .replace(/\bwere reviewed\b/gi, "telah disemak");
+
+      // frasa umum
+      t = t
+        .replace(/\bin accordance with\b/gi, "berdasarkan")
+        .replace(/\bas per\b/gi, "mengikut")
+        .replace(/\baccording to\b/gi, "berdasarkan")
+        .replace(/\bin the specified system\b/gi, "dalam sistem yang ditetapkan")
+        .replace(/\bin the system specified\b/gi, "dalam sistem yang ditetapkan");
+
+      t = t.replace(/\s{2,}/g, " ").trim();
+      if (t && !/[.!?]$/.test(t)) t += ".";
+      return t;
+    }
+
+    // ===============================
+    // Helpers: bina PC BM past/outcome dari (verb, object, qualifier)
+    // (untuk fallback/repair bila AI degil)
+    // ===============================
+    function verbToPassiveMs(verbRaw = "") {
       const v = String(verbRaw || "").trim().toLowerCase();
-
       const map = {
-        "kenal pasti": "dikenal pasti",
-        "rekod": "direkodkan",
-        "catat": "dicatat",
-        "baca": "dibaca",
-        "periksa": "diperiksa",
-        "semak": "disemak",
-        "sediakan": "disediakan",
-        "buat": "dibuat",
-        "laksana": "dilaksanakan",
-        "analisis": "dianalisis",
-        "nilai": "dinilai",
-        "siasat": "disiasat",
-        "hantar": "dihantar",
-        "salur": "disalurkan",
-        "buat tindakan": "tindakan diambil",
+        "kenal pasti": "dikenalpasti",
+        kenalpasti: "dikenalpasti",
+        rekod: "direkodkan",
+        catat: "dicatat",
+        baca: "dibaca",
+        periksa: "diperiksa",
+        semak: "disemak",
+        sediakan: "disediakan",
+        buat: "dibuat",
+        laksana: "dilaksanakan",
+        analisis: "dianalisis",
+        nilai: "dinilai",
+        siasat: "disiasat",
+        hantar: "dihantar",
+        salur: "disalurkan",
       };
-
       if (map[v]) return map[v];
-      if (v.startsWith("di")) return v;
-
+      if (v.startsWith("di")) return v; // dah passive
       return "dilaksanakan";
     }
 
-    function buildPastPcText(verb, object, qualifier) {
+    function buildPastPcTextMs(verb, object, qualifier) {
       const obj = String(object || "").trim() || "Aktiviti kerja";
       const qual = String(qualifier || "").trim();
-      const passive = verbToPassive(verb);
-
+      const passive = verbToPassiveMs(verb);
       let s = `${obj} telah ${passive}`;
       if (qual) s += ` ${qual}`;
-      if (!s.endsWith(".")) s += ".";
-
+      if (!/[.!?]$/.test(s)) s += ".";
       return s;
     }
+
+    // ===============================
+    // Fallback generator (no AI) — WS arahan, PC outcome (past tense)
+    // ===============================
+    function fallbackSeed(waTitle, idx) {
+      const base = [
+        { ws: "Kenal pasti keperluan dan persediaan awal.", verb: "kenal pasti", object: "Keperluan dan persediaan awal", qualifier: "berdasarkan keperluan operasi" },
+        { ws: "Sediakan peralatan dan bahan mengikut SOP.", verb: "sediakan", object: "Peralatan dan bahan", qualifier: "mengikut prosedur operasi standard yang ditetapkan" },
+        { ws: "Laksanakan langkah kerja mengikut turutan.", verb: "laksana", object: "Langkah kerja", qualifier: "mengikut turutan yang ditetapkan" },
+        { ws: "Semak hasil kerja dan buat pembetulan jika perlu.", verb: "semak", object: "Hasil kerja", qualifier: "bagi memastikan pematuhan keperluan" },
+        { ws: "Rekod dan laporkan pelaksanaan.", verb: "rekod", object: "Pelaksanaan kerja", qualifier: "mengikut sistem pelaporan yang ditetapkan" },
+      ].slice(0, wsPerWa);
+
+      return {
+        waId: "",
+        waTitle: waTitle || `WA${idx + 1}`,
+        workSteps: base.map((item, i) => ({
+          wsId: "",
+          wsNo: `${idx + 1}.${i + 1}`,
+          wsText: item.ws,
+          pc: {
+            verb: item.verb,
+            object: item.object,
+            qualifier: item.qualifier,
+            pcText: buildPastPcTextMs(item.verb, item.object, item.qualifier),
+          },
+        })),
+      };
+    }
+
+    // ===============================
+    // AI path (jika ada OpenAI client dalam projek)
+    // - Kita guna prompt EN untuk enforce "passive past"
+    // - Lepas tu convert -> BM outcome (msPastify)
+    // ===============================
+    async function tryAiSeed() {
+      // Jika projek Prof ada util openai, letak call di sini.
+      // Saya cuba guna global `openai` jika wujud.
+      if (!globalThis.openai || !process.env.OPENAI_API_KEY) return null;
+
+      const waClean = waList.map((x) => String(x || "").trim()).filter(Boolean);
+
+      const prompt = `
+You are generating Competency Profile details.
+
+Return STRICT JSON only (no markdown, no commentary).
+For each Work Activity (WA), generate ${wsPerWa} Work Steps (WS) and Performance Criteria (PC).
+
+Rules:
+- WS must be Malay (BM), imperative/action instruction.
+- PC must be English, outcome-based, passive past tense (e.g., "Revenue sources have been identified based on financial reports.").
+- PC must reflect the WS result, NOT an instruction.
+- PC must NOT contain any first-person words (I, we, our, my).
+- Keep sentences short, clear, auditable.
+
+Output schema:
+{
+  "workActivities": [
+    {
+      "waTitle": "string",
+      "workSteps": [
+        {
+          "wsText": "BM imperative",
+          "pcTextEn": "EN passive past outcome",
+          "verb": "BM verb (optional)",
+          "object": "BM object (optional)",
+          "qualifier": "BM qualifier (optional)"
+        }
+      ]
+    }
+  ]
+}
+
+Context:
+CU: ${cuCode} - ${cuTitle || ""}
+WA List: ${JSON.stringify(waClean)}
+      `.trim();
+
+      // ✅ Contoh panggilan untuk OpenAI SDK moden.
+      // Jika projek Prof guna cara lain, ubah sedikit di sini sahaja.
+      const resp = await globalThis.openai.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0.2,
+        messages: [{ role: "user", content: prompt }],
+      });
+
+      const raw = resp?.choices?.[0]?.message?.content || "";
+      const json = JSON.parse(raw);
+
+      // normalize output
+      const workActivities = Array.isArray(json?.workActivities) ? json.workActivities : [];
+      return workActivities;
+    }
+
+    let workActivitiesAi = null;
+    try {
+      workActivitiesAi = await tryAiSeed();
+    } catch (e) {
+      // kalau AI fail, kita fallback
+      workActivitiesAi = null;
+    }
+
+    // ===============================
+    // Build final workActivities
+    // - jika AI ada: convert pcTextEn -> BM past/outcome
+    // - jika tiada AI: fallbackSeed
+    // ===============================
+    const finalWorkActivities = (workActivitiesAi && workActivitiesAi.length
+      ? workActivitiesAi.map((wa, waIdx) => {
+          const title = String(wa?.waTitle || waList[waIdx] || `WA${waIdx + 1}`).trim();
+
+          const steps = Array.isArray(wa?.workSteps) ? wa.workSteps : [];
+          const fixedSteps = steps.slice(0, wsPerWa).map((x, i) => {
+            const wsText = String(x?.wsText || "").trim() || `Laksanakan kerja bagi ${title}.`;
+            const pcEn = String(x?.pcTextEn || "").trim();
+
+            const verb = String(x?.verb || "").trim();
+            const object = String(x?.object || "").trim();
+            const qualifier = String(x?.qualifier || "").trim();
+
+            // Convert EN->MS
+            let pcMs = msPastify(pcEn);
+
+            // REPAIR jika kosong / masih arahan / ada first-person / tak jadi outcome
+            const looksImperative =
+              /^(kenal pasti|rekod|catat|baca|periksa|semak|sediakan|buat|laksana|analisis|nilai|hantar|salur)\b/i.test(pcMs) ||
+              /^(identify|record|check|review|prepare|conduct|analyze|assess)\b/i.test(pcEn);
+
+            const hasFirstPerson = /\b(I|We|Our|My|Saya|Kami|Kita)\b/i.test(pcEn) || /\b(Saya|Kami|Kita)\b/i.test(pcMs);
+
+            if (!pcMs || looksImperative || hasFirstPerson) {
+              // bina semula guna BM (kalau ada verb/object/qualifier), kalau tak ada, guna wsText untuk object ringkas
+              const objFallback = object || wsText.replace(/\.$/, "");
+              pcMs = buildPastPcTextMs(verb || "laksana", objFallback, qualifier || "mengikut keperluan yang ditetapkan");
+            }
+
+            return {
+              wsId: "",
+              wsNo: `${waIdx + 1}.${i + 1}`,
+              wsText,
+              pc: {
+                verb: verb || "",
+                object: object || "",
+                qualifier: qualifier || "",
+                pcText: pcMs,
+              },
+            };
+          });
+
+          // kalau AI tak bagi steps, fallback untuk WA ini
+          if (!fixedSteps.length) {
+            return fallbackSeed(title, waIdx);
+          }
+
+          return {
+            waId: "",
+            waTitle: title,
+            workSteps: fixedSteps,
+          };
+        })
+      : waList.map((t, i) => fallbackSeed(String(t || "").trim(), i))
+    );
+
+    // ===============================
+    // Kalau session lang = EN dan Prof nak PC kekal EN:
+    // (optional) — buat masa ini kita kekalkan MS outcome untuk stabil.
+    // ===============================
+    return res.json({
+      ok: true,
+      sessionId,
+      cuCode,
+      lang,
+      workActivities: finalWorkActivities,
+    });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// ===============================
+// EN -> MS (rules ringan, stabil)
+// ===============================
+function cleanFirstPerson(s = "") {
+  return String(s)
+    .replace(/\b(I|We|Our|Ours|Me|My)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}
+
+function msPastify(pcEn = "") {
+  let s = cleanFirstPerson(pcEn);
+
+  // Core passive patterns
+  s = s
+    .replace(/\bhas been identified\b/gi, "telah dikenalpasti")
+    .replace(/\bhave been identified\b/gi, "telah dikenalpasti")
+    .replace(/\bwas identified\b/gi, "telah dikenalpasti")
+    .replace(/\bwere identified\b/gi, "telah dikenalpasti")
+
+    .replace(/\bhas been recorded\b/gi, "telah direkodkan")
+    .replace(/\bhave been recorded\b/gi, "telah direkodkan")
+    .replace(/\bwas recorded\b/gi, "telah direkodkan")
+    .replace(/\bwere recorded\b/gi, "telah direkodkan")
+
+    .replace(/\bhas been analysed\b/gi, "telah dianalisis")
+    .replace(/\bhave been analysed\b/gi, "telah dianalisis")
+    .replace(/\bwas analysed\b/gi, "telah dianalisis")
+    .replace(/\bwere analysed\b/gi, "telah dianalisis")
+    .replace(/\bhas been analyzed\b/gi, "telah dianalisis")
+    .replace(/\bhave been analyzed\b/gi, "telah dianalisis")
+    .replace(/\bwas analyzed\b/gi, "telah dianalisis")
+    .replace(/\bwere analyzed\b/gi, "telah dianalisis")
+
+    .replace(/\bhas been prepared\b/gi, "telah disediakan")
+    .replace(/\bhave been prepared\b/gi, "telah disediakan")
+    .replace(/\bwas prepared\b/gi, "telah disediakan")
+    .replace(/\bwere prepared\b/gi, "telah disediakan")
+
+    .replace(/\bhas been conducted\b/gi, "telah dilaksanakan")
+    .replace(/\bhave been conducted\b/gi, "telah dilaksanakan")
+    .replace(/\bwas conducted\b/gi, "telah dilaksanakan")
+    .replace(/\bwere conducted\b/gi, "telah dilaksanakan")
+
+    .replace(/\bhas been verified\b/gi, "telah disahkan")
+    .replace(/\bhave been verified\b/gi, "telah disahkan")
+    .replace(/\bwas verified\b/gi, "telah disahkan")
+    .replace(/\bwere verified\b/gi, "telah disahkan")
+
+    .replace(/\bhas been reviewed\b/gi, "telah disemak")
+    .replace(/\bhave been reviewed\b/gi, "telah disemak")
+    .replace(/\bwas reviewed\b/gi, "telah disemak")
+    .replace(/\bwere reviewed\b/gi, "telah disemak");
+
+  // Common phrases (optional, boleh tambah ikut domain)
+  s = s
+    .replace(/\bin accordance with\b/gi, "berdasarkan")
+    .replace(/\bas per\b/gi, "mengikut")
+    .replace(/\baccording to\b/gi, "berdasarkan")
+    .replace(/\bin the (system|systems) specified\b/gi, "dalam sistem yang ditetapkan")
+    .replace(/\bin the specified system\b/gi, "dalam sistem yang ditetapkan");
+
+  // Kemas ayat
+  s = s.replace(/\s{2,}/g, " ").trim();
+  // Pastikan ada noktah
+  if (s && !/[.!?]$/.test(s)) s += ".";
+  return s;
+}
+
+// WS English (imperative) -> WS BM (imperatif) — rules ringan
+function msImperative(wsEn = "") {
+  let s = cleanFirstPerson(wsEn);
+
+  // verb awal ayat (simple mapping)
+  s = s
+    .replace(/^\s*Identify\b/i, "Kenal pasti")
+    .replace(/^\s*Record\b/i, "Rekod")
+    .replace(/^\s*Analyze\b/i, "Analisis")
+    .replace(/^\s*Analyse\b/i, "Analisis")
+    .replace(/^\s*Prepare\b/i, "Sediakan")
+    .replace(/^\s*Review\b/i, "Semak")
+    .replace(/^\s*Verify\b/i, "Sahkan")
+    .replace(/^\s*Conduct\b/i, "Laksanakan")
+    .replace(/^\s*Compile\b/i, "Kumpulkan")
+    .replace(/^\s*Summarize\b/i, "Sediakan ringkasan")
+    .replace(/^\s*Plan\b/i, "Rancang")
+    .replace(/^\s*Implement\b/i, "Laksanakan");
+
+  s = s.replace(/\s{2,}/g, " ").trim();
+  if (s && !/[.!?]$/.test(s)) s += ".";
+  return s || wsEn;
+}
 
     // ---------- If no OpenAI key, return fallback ----------
     if (!process.env.OPENAI_API_KEY) {
