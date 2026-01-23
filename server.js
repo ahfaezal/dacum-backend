@@ -1269,9 +1269,6 @@ function generateCpDraft({ sessionId, cpc, cu }) {
 const workSteps = templates.map((tpl, idx) => {
   const wsNo = `${i + 1}.${idx + 1}`;
 
-const workSteps = templates.map((tpl, idx) => {
-  const wsNo = `${i + 1}.${idx + 1}`;
-
   const pcAuto =
     lang === "MS"
       ? buildPcMS({ wsText: tpl.ws })
