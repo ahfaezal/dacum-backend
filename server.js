@@ -1269,6 +1269,9 @@ function generateCpDraft({ sessionId, cpc, cu }) {
 const workSteps = templates.map((tpl, idx) => {
   const wsNo = `${i + 1}.${idx + 1}`;
 
+const workSteps = templates.map((tpl, idx) => {
+  const wsNo = `${i + 1}.${idx + 1}`;
+
   const pcAuto =
     lang === "MS"
       ? buildPcMS({ wsText: tpl.ws })
@@ -1276,12 +1279,7 @@ const workSteps = templates.map((tpl, idx) => {
           verb: tpl.verb,
           object: tpl.object,
           qualifier: tpl.qualifier,
-          pcText: makePcText({
-            lang,
-            verb: tpl.verb,
-            object: tpl.object,
-            qualifier: tpl.qualifier,
-          }),
+          pcText: makePcText({ lang, verb: tpl.verb, object: tpl.object, qualifier: tpl.qualifier }),
         };
 
   return {
