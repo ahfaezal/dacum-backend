@@ -354,45 +354,43 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
     }
 
     // ---------- Fallback generator (no AI) ----------
-    function fallbackSeed(waTitle, idx) {
-      const base = [
-        {
-          ws: "Kenal pasti keperluan dan persediaan awal.",
-          pc: "Keperluan dan persediaan awal telah dikenalpasti berdasarkan keperluan operasi."
-        },
-        {
-          ws: "Sediakan peralatan dan bahan mengikut SOP.",
-          pc: "Peralatan dan bahan telah disediakan mengikut prosedur operasi standard yang ditetapkan."
-        },
-        {
-          ws: "Laksanakan langkah kerja mengikut turutan.",
-          pc: "Langkah kerja telah dilaksanakan mengikut turutan yang ditetapkan dengan tepat."
-        },
-        {
-          ws: "Semak hasil kerja dan buat pembetulan jika perlu.",
-          pc: "Hasil kerja telah disemak dan pembetulan dibuat bagi memastikan pematuhan keperluan."
-        },
-        {
-          ws: "Rekod dan laporkan pelaksanaan.",
-          pc: "Pelaksanaan kerja telah direkod dan dilaporkan mengikut sistem pelaporan yang ditetapkan."
-        },
-      ].slice(0, wsPerWa);
+    function verbToPassive(verbRaw) {
+      const v = String(verbRaw || "").trim().toLowerCase();
 
-      return {
-        waId: "",
-        waTitle: waTitle || `WA${idx + 1}`,
-        workSteps: base.map((item, i) => ({
-          wsId: "",
-          wsNo: `${idx + 1}.${i + 1}`,
-          wsText: item.ws,
-          pc: {
-            verb: "",        // boleh dikira automatik kemudian
-            object: "",
-            qualifier: "",
-            pcText: item.pc, // ✅ past tense, outcome-based
-          },
-        })),
+      const map = {
+        "kenal pasti": "dikenal pasti",
+        "rekod": "direkodkan",
+        "catat": "dicatat",
+        "baca": "dibaca",
+        "periksa": "diperiksa",
+        "semak": "disemak",
+        "sediakan": "disediakan",
+        "buat": "dibuat",
+        "laksana": "dilaksanakan",
+        "analisis": "dianalisis",
+        "nilai": "dinilai",
+        "siasat": "disiasat",
+        "hantar": "dihantar",
+        "salur": "disalurkan",
+        "buat tindakan": "tindakan diambil",
       };
+
+      if (map[v]) return map[v];
+      if (v.startsWith("di")) return v;
+
+      return "dilaksanakan";
+    }
+
+    function buildPastPcText(verb, object, qualifier) {
+      const obj = String(object || "").trim() || "Aktiviti kerja";
+      const qual = String(qualifier || "").trim();
+      const passive = verbToPassive(verb);
+
+      let s = `${obj} telah ${passive}`;
+      if (qual) s += ` ${qual}`;
+      if (!s.endsWith(".")) s += ".";
+
+      return s;
     }
 
     // ---------- If no OpenAI key, return fallback ----------
