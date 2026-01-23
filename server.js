@@ -333,6 +333,155 @@ app.get("/api/session/cus", (req, res) => {
   }
 });
 
+// ======================================================
+// CP AI: Seed Work Steps (WS) + Performance Criteria (PC)
+// POST /api/cp/ai/seed-ws
+// Body: { sessionId, cuCode, cuTitle, waList: [string], wsPerWa?: number }
+// ======================================================
+app.post("/api/cp/ai/seed-ws", async (req, res) => {
+  try {
+    const sessionId = String(req.body?.sessionId || "").trim();
+    const cuCode = String(req.body?.cuCode || req.body?.cuId || "").trim().toLowerCase();
+    const cuTitle = String(req.body?.cuTitle || "").trim();
+    const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
+    const wsPerWa = Math.min(7, Math.max(3, Number(req.body?.wsPerWa || 5)));
+
+    if (!sessionId || !cuCode) {
+      return res.status(400).json({ error: "sessionId / cuCode tidak sah" });
+    }
+    if (!waList.length) {
+      return res.status(400).json({ error: "waList kosong (tiada WA)" });
+    }
+
+    // ---------- Fallback generator (no AI) ----------
+    function fallbackSeed(waTitle, idx) {
+      const base = [
+        "Kenal pasti keperluan dan persediaan awal.",
+        "Sediakan peralatan/bahan mengikut SOP.",
+        "Laksanakan langkah kerja mengikut turutan.",
+        "Semak hasil kerja dan betulkan jika perlu.",
+        "Rekod dan laporkan pelaksanaan.",
+      ].slice(0, wsPerWa);
+
+      return {
+        waId: "",
+        waTitle: waTitle || `WA${idx + 1}`,
+        workSteps: base.map((t, i) => ({
+          wsId: "",
+          wsNo: `${idx + 1}.${i + 1}`,
+          wsText: t,
+          pc: {
+            verb: "Semak",
+            object: "pelaksanaan",
+            qualifier: "mengikut SOP",
+            pcText: "Pelaksanaan disemak mengikut SOP dan keperluan keselamatan.",
+          },
+        })),
+      };
+    }
+
+    // ---------- If no OpenAI key, return fallback ----------
+    if (!process.env.OPENAI_API_KEY) {
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({
+        ok: true,
+        mode: "fallback",
+        workActivities,
+      });
+    }
+
+    // ---------- AI mode ----------
+    // Jika server.js anda sudah ada OpenAI client, guna yang sedia ada.
+    // Kalau belum, anda boleh guna fetch ke OpenAI (tetapi pastikan dependensi tersedia).
+    // Di sini saya guna fetch (paling neutral).
+    const prompt = {
+      role: "user",
+      content: `
+Anda membantu membina CP (Competency Profile) untuk NOSS.
+CU: ${cuTitle} (${cuCode})
+Senarai WA:
+${waList.map((x, i) => `${i + 1}. ${x}`).join("\n")}
+
+Tugas:
+Untuk setiap WA, hasilkan ${wsPerWa} Work Steps (WS) dalam Bahasa Melayu (Malaysia), ringkas tetapi jelas, berbentuk tindakan.
+Setiap WS mesti ada:
+- wsNo (contoh "1.1")
+- wsText
+- pc: { verb, object, qualifier, pcText }  (pcText ayat penuh)
+
+Pulangkan JSON SAHAJA dengan format:
+{
+  "workActivities": [
+    {
+      "waTitle": "...",
+      "workSteps": [
+        { "wsNo":"1.1", "wsText":"...", "pc":{"verb":"...","object":"...","qualifier":"...","pcText":"..."} }
+      ]
+    }
+  ]
+}
+Tiada teks lain selain JSON.
+      `.trim(),
+    };
+
+    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0.3,
+        messages: [
+          { role: "system", content: "Anda penulis standard kerja NOSS. Jawab dalam BM Malaysia. JSON sahaja." },
+          prompt,
+        ],
+      }),
+    });
+
+    if (!aiResp.ok) {
+      const t = await aiResp.text().catch(() => "");
+      // fallback bila AI fail
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({ ok: true, mode: "fallback_after_ai_fail", note: t, workActivities });
+    }
+
+    const aiJson = await aiResp.json();
+    const text = aiJson?.choices?.[0]?.message?.content || "";
+
+    let parsed;
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      // fallback bila AI pulang bukan JSON
+      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
+      return res.json({ ok: true, mode: "fallback_after_bad_json", raw: text, workActivities });
+    }
+
+    // normalise output
+    const workActivities = (parsed.workActivities || []).map((wa, idx) => ({
+      waId: "",
+      waTitle: String(wa?.waTitle || waList[idx] || `WA${idx + 1}`),
+      workSteps: (wa?.workSteps || []).map((ws, j) => ({
+        wsId: "",
+        wsNo: String(ws?.wsNo || `${idx + 1}.${j + 1}`),
+        wsText: String(ws?.wsText || "").trim(),
+        pc: {
+          verb: String(ws?.pc?.verb || "").trim(),
+          object: String(ws?.pc?.object || "").trim(),
+          qualifier: String(ws?.pc?.qualifier || "").trim(),
+          pcText: String(ws?.pc?.pcText || "").trim(),
+        },
+      })),
+    }));
+
+    return res.json({ ok: true, mode: "ai", workActivities });
+  } catch (e) {
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 /* ======================================================
  * 3) AI CLUSTER (PREVIEW + REAL)
  * ====================================================== */
