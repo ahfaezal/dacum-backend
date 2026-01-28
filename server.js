@@ -22,6 +22,7 @@ const cheerio = require("cheerio");
 const { Server } = require("socket.io");
 const fs = require("fs");
 const path = require("path");
+const crypto = require("crypto");
 
 // ===== OpenAI SDK v4 =====
 const OpenAI = require("openai");
@@ -210,6 +211,79 @@ app.post("/api/liveboard/:sessionId", async (req, res) => {
   } catch (err) {
     console.error("POST /api/liveboard error:", err);
     return res.status(500).json({ ok: false, error: "Gagal simpan LiveBoard ke S3" });
+  }
+});
+
+// ======================================================
+// LIVEBOARD (S3) — APPEND CARD (Panel Input)
+// POST /api/liveboard/:sessionId/append
+// body: { panelName, activity }
+// ======================================================
+app.post("/api/liveboard/:sessionId/append", async (req, res) => {
+  try {
+    const sessionIdRaw = String(req.params.sessionId || "").trim();
+    if (!sessionIdRaw) {
+      return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+    }
+
+    if (!S3_BUCKET_INOSS) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET_INOSS belum diset" });
+    }
+
+    const panelName = String(req.body?.panelName || req.body?.name || "").trim();
+    const activity = String(req.body?.activity || req.body?.text || "").trim();
+
+    if (!panelName) return res.status(400).json({ ok: false, error: "Nama panel diperlukan" });
+    if (!activity) return res.status(400).json({ ok: false, error: "Aktiviti kerja diperlukan" });
+
+    const key = s3KeyLiveboard(sessionIdRaw);
+    if (!key) return res.status(400).json({ ok: false, error: "S3 key tidak sah" });
+
+    // Load liveboard semasa (jika tiada, mula dengan default)
+    let board = { sessionId: sessionIdRaw, cards: [], version: 1, lastUpdatedAt: null };
+    const exists = await s3Exists(key);
+    if (exists) {
+      try {
+        board = await s3GetJson(key);
+      } catch {
+        // kalau JSON rosak, fallback ke default
+        board = { sessionId: sessionIdRaw, cards: [], version: 1, lastUpdatedAt: null };
+      }
+    }
+
+    const cards = Array.isArray(board.cards) ? board.cards : [];
+
+    const now = new Date();
+    const newCard = {
+      id: crypto.randomUUID ? crypto.randomUUID() : String(now.getTime()) + "-" + Math.random().toString(16).slice(2),
+      activity,            // LiveBoard render guna c.activity || c.name
+      panelName,
+      time: now.toISOString(),      // optional, LiveBoard display sebelah kanan
+      createdAt: now.toISOString(), // untuk audit
+      source: "panel",
+    };
+
+    // Append + kemas kini meta
+    const nextBoard = {
+      ...board,
+      sessionId: sessionIdRaw,
+      cards: [...cards, newCard],
+      version: Number(board?.version || 1),
+      lastUpdatedAt: now.toISOString(),
+    };
+
+    await s3PutJson(key, nextBoard);
+
+    return res.json({
+      ok: true,
+      sessionId: sessionIdRaw,
+      appended: true,
+      card: newCard,
+      totalCards: nextBoard.cards.length,
+    });
+  } catch (err) {
+    console.error("POST /api/liveboard/:sessionId/append error:", err);
+    return res.status(500).json({ ok: false, error: "Gagal append kad ke LiveBoard (S3)" });
   }
 });
 
