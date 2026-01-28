@@ -27,6 +27,72 @@ const path = require("path");
 const OpenAI = require("openai");
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+// ===== S3 (AWS SDK v3) =====
+const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+
+const S3_BUCKET_INOSS = process.env.S3_BUCKET_INOSS;
+const AWS_REGION = process.env.AWS_REGION || "ap-southeast-1";
+
+function mustEnv(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env: ${name}`);
+  return v;
+}
+
+const s3 = new S3Client({
+  region: AWS_REGION,
+  credentials: {
+    accessKeyId: mustEnv("AWS_ACCESS_KEY_ID"),
+    secretAccessKey: mustEnv("AWS_SECRET_ACCESS_KEY"),
+  },
+});
+
+function sanitizeSessionId(sid) {
+  // kekalkan ringkas & selamat untuk S3 key
+  return String(sid || "")
+    .trim()
+    .replace(/\s+/g, "-")
+    .replace(/[^a-zA-Z0-9._-]/g, "");
+}
+
+// stream -> string helper
+async function streamToString(stream) {
+  return await new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+  });
+}
+
+async function s3GetJson(key, fallback) {
+  try {
+    const res = await s3.send(
+      new GetObjectCommand({ Bucket: S3_BUCKET_INOSS, Key: key })
+    );
+    const text = await streamToString(res.Body);
+    return JSON.parse(text);
+  } catch (e) {
+    // fail belum wujud = normal (NoSuchKey / 404)
+    const code = e?.name || e?.Code;
+    if (code === "NoSuchKey" || code === "NotFound") return fallback;
+    // kadang AWS letak statusCode
+    if (e?.$metadata?.httpStatusCode === 404) return fallback;
+    throw e;
+  }
+}
+
+async function s3PutJson(key, obj) {
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: S3_BUCKET_INOSS,
+      Key: key,
+      Body: JSON.stringify(obj, null, 2),
+      ContentType: "application/json; charset=utf-8",
+    })
+  );
+}
+
 /* =========================
  * APP + MIDDLEWARE
  * ========================= */
@@ -51,6 +117,73 @@ app.get("/health", (req, res) => {
   });
 });
 app.get("/", (req, res) => res.send("iNOSS Backend OK"));
+
+/**
+ * POST /api/panel/submit
+ * body: { sessionId, panelName, text }
+ */
+app.post("/api/panel/submit", async (req, res) => {
+  try {
+    const sessionIdRaw = req.body?.sessionId;
+    const panelName = String(req.body?.panelName || "").trim();
+    const text = String(req.body?.text || "").trim();
+
+    const sessionId = sanitizeSessionId(sessionIdRaw);
+
+    if (!sessionId) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+    if (!panelName) return res.status(400).json({ ok: false, error: "nama panel wajib" });
+    if (!text) return res.status(400).json({ ok: false, error: "input aktiviti kerja wajib" });
+
+    if (!S3_BUCKET_INOSS) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET_INOSS belum diset" });
+    }
+
+    const key = `sessions/${sessionId}/panel_inputs.json`;
+
+    // ambil data sedia ada, append, simpan balik
+    const existing = await s3GetJson(key, { sessionId, items: [] });
+
+    const item = {
+      id: `${Date.now()}-${Math.random().toString(16).slice(2)}`,
+      sessionId,
+      panelName,
+      text,
+      createdAt: new Date().toISOString(),
+    };
+
+    existing.sessionId = sessionId;
+    existing.items = Array.isArray(existing.items) ? existing.items : [];
+    existing.items.push(item);
+
+    await s3PutJson(key, existing);
+
+    return res.json({ ok: true, saved: item });
+  } catch (e) {
+    console.error("panel submit s3 error:", e);
+    return res.status(500).json({ ok: false, error: "Gagal simpan ke S3" });
+  }
+});
+
+/**
+ * GET /api/panel/list/:sessionId
+ */
+app.get("/api/panel/list/:sessionId", async (req, res) => {
+  try {
+    const sessionId = sanitizeSessionId(req.params.sessionId);
+    if (!sessionId) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+    if (!S3_BUCKET_INOSS) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET_INOSS belum diset" });
+    }
+
+    const key = `sessions/${sessionId}/panel_inputs.json`;
+    const data = await s3GetJson(key, { sessionId, items: [] });
+
+    return res.json({ ok: true, sessionId, items: data.items || [] });
+  } catch (e) {
+    console.error("panel list s3 error:", e);
+    return res.status(500).json({ ok: false, error: "Gagal baca dari S3" });
+  }
+});
 
 /* ======================================================
  * 0) SESSIONS (CANONICAL)
