@@ -2341,9 +2341,14 @@ app.post("/api/cluster/run/:sessionId", async (req, res) => {
       return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
 
     const cards = items
-      .map((c) => ({ id: c.id, activity: getCardText(c) }))
-      .filter((c) => c.activity);
+      .map(c => ({ id: c.id, activity: getCardText(c) }));
 
+    console.log("CLUSTER DEBUG:", {
+      totalItems: items.length,
+      withText: cards.filter(c => c.activity).length,
+      sample: cards.slice(0, 5)
+    });
+    
     if (cards.length < 5)
       return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
 
