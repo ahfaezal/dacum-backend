@@ -1191,7 +1191,19 @@ app.post("/api/cluster/run", async (req, res) => {
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
 
     const cards = items.map((c) => ({ id: c.id, activity: getCardText(c) })).filter((c) => c.activity);
-    if (cards.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+    const validIds = new Set(cards.map((c) => String(c.id).trim()));
+
+    const normId = (v) => {
+      if (v === null || v === undefined) return "";
+      const s = String(v).trim();
+      if (s === "null" || s === "undefined") return "";
+      return s;
+    };
+
+    const sanitizeIds = (arr) =>
+      (Array.isArray(arr) ? arr : [])
+        .map(normId)
+        .filter((id) => id && validIds.has(id));
 
     const lang = String(s.lang || "MS").toUpperCase(); // "MS" | "EN"
 
@@ -1221,9 +1233,13 @@ Task: Cluster work activities into logical CU groups.
 
 Output must be JSON ONLY, format:
 {
-  "clusters":[{"title":"...","cardIds":[1,2,3]}],
+  "clusters":[{"title":"...","cardIds":["<ID>","<ID>"]}],
   "unassigned":[]
 }
+
+IMPORTANT:
+- Each cardId MUST be EXACTLY one of the IDs shown in parentheses before each activity.
+- cardIds MUST be strings, do NOT invent new IDs, do NOT convert IDs to numbers.
 
 Rules:
 - Number of clusters: 4 to 12 (as appropriate).
@@ -2412,7 +2428,19 @@ app.post("/api/cluster/run/:sessionId", async (req, res) => {
     if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
 
     const cards = items.map((c) => ({ id: c.id, activity: getCardText(c) })).filter((c) => c.activity);
-    if (cards.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+    const validIds = new Set(cards.map((c) => String(c.id).trim()));
+
+    const normId = (v) => {
+      if (v === null || v === undefined) return "";
+      const s = String(v).trim();
+      if (s === "null" || s === "undefined") return "";
+      return s;
+    };
+
+    const sanitizeIds = (arr) =>
+      (Array.isArray(arr) ? arr : [])
+        .map(normId)
+        .filter((id) => id && validIds.has(id));
 
     const lang = String(s.lang || "MS").toUpperCase(); // "MS" | "EN"
 
@@ -2442,7 +2470,7 @@ Task: Cluster work activities into logical CU groups.
 
 Output must be JSON ONLY, format:
 {
-  "clusters":[{"title":"...","cardIds":[1,2,3]}],
+  "clusters":[{"title":"...","cardIds":["<ID>","<ID>"]}],
   "unassigned":[]
 }
 
