@@ -1734,102 +1734,294 @@ function padWorkStepsToMin({
   return out;
 }
 
+/**
+ * AI-Assisted CP Draft (Paparan 2)
+ * - CU & WA LOCKED ikut CPC
+ * - min 3 WS per WA
+ * - 1 PC per WS (ayat "Telah ..." + measurable)
+ */
+async function generateCpDraft({ sessionId, cpc, cu, ai = {} }) {
+  const nowIso = new Date().toISOString();
 
-// ===============================
-// CP Draft Generator
-// ===============================
-function generateCpDraft({ sessionId, cpc, cu }) {
-  const lang = detectLanguageFromCpc(cpc); // "EN"|"MS"
-  const waList = extractWaFromCu(cu);
+  const cuCode = String(cu?.cuCode || cu?.cuId || cu?.id || cu?.code || "").trim().toLowerCase();
+  const cuTitle = String(cu?.cuTitle || cu?.title || cu?.name || "").trim();
 
-  const cp = {
-    sessionId,
-    cpId: null,
-    cpcVersion: String(cpc?.generatedAt || cpc?.exportedAt || cpc?.version || "CPC").trim(),
-    status: "DRAFT",
-    cu: {
-      cuId: cu?.cuId || cu?.id || "",
-      cuCode: cu?.cuCode || cu?.code || "",
-      cuTitle: cu?.cuTitle || cu?.title || "",
-      cuDescription: cu?.cuDescription || cu?.description || "",
-    },
-    workActivities: waList.map((wa, i) => {
-      const templates = lang === "MS" ? waTemplatesForMS(wa.waTitle) : waTemplatesForEN(wa.waTitle);
+  const wsMin = Math.max(3, Number(ai?.wsMin || 3));
+  const pcPerWs = Math.max(1, Number(ai?.pcPerWs || 1)); // kita lock 1
+  const language = String(ai?.language || "MS").toUpperCase();
 
-const workSteps = templates.map((tpl, idx) => {
-  const wsNo = `${i + 1}.${idx + 1}`;
+  const waArr = Array.isArray(cu?.wa) ? cu.wa : (Array.isArray(cu?.was) ? cu.was : []);
+  const waItemsLocked = waArr
+    .map((w) => ({
+      waCode: String(w?.waCode || w?.waId || w?.id || w?.code || "").trim().toLowerCase(),
+      waTitle: String(w?.waTitle || w?.title || w?.name || "").trim(),
+    }))
+    .filter((w) => w.waCode && w.waTitle);
 
-  const pcAuto =
-    lang === "MS"
-      ? buildPcMS({ wsText: tpl.ws })
-      : {
-          verb: tpl.verb,
-          object: tpl.object,
-          qualifier: tpl.qualifier,
-          pcText: makePcText({ lang, verb: tpl.verb, object: tpl.object, qualifier: tpl.qualifier }),
-        };
+  // helper: jadikan wsCode "1.1, 1.2..." ikut WA index
+  const makeWsCode = (waIndex1, wsIndex1) => `${waIndex1}.${wsIndex1}`;
 
+  // ====== AI call wrapper ======
+  async function callLLM(prompt) {
+    // Jika anda sudah ada openai client dalam server.js, gunakan.
+    // Contoh umum:
+    // const resp = await openai.responses.create({ model: "gpt-4.1-mini", input: prompt });
+    // const text = resp.output_text;
+    //
+    // Jika tiada openai, return null untuk fallback template.
+    try {
+      if (!globalThis.openai) return null; // <-- anda boleh tukar ke variable openai sebenar
+      const resp = await globalThis.openai.responses.create({
+        model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+        input: prompt,
+      });
+      const text = resp?.output_text || "";
+      return String(text || "").trim();
+    } catch (e) {
+      console.error("LLM error:", e?.message || e);
+      return null;
+    }
+  }
+
+  // ====== Prompt builder (MS, measurable, past tense) ======
+  function buildPrompt({ cuTitle, waTitle, wsMin }) {
+    return `
+Anda ialah pembangun National Occupational Skills Standard (NOSS) Malaysia.
+
+COMPETENCY UNIT (CU):
+${cuTitle}
+
+WORK ACTIVITY (WA):
+${waTitle}
+
+TUGAS:
+1) Jana minimum ${wsMin} WORK STEP (WS) untuk melengkapkan proses kerja WA ini.
+2) Setiap WS mesti bermula dengan kata kerja tindakan (contoh: Semak, Rekod, Sedia, Laksana, Sahkan, Susun, Laporkan).
+3) Untuk setiap WS, jana 1 PERFORMANCE CRITERIA (PC).
+4) PC mesti dalam ayat PAST TENSE (mula dengan "Telah ...") dan BOLEH DIUKUR berdasarkan bukti seperti rekod, dokumen, prosedur, borang, jadual, laporan, semakan, pengesahan.
+5) Jangan ulang ayat WA sebagai WS.
+6) Jangan guna perkataan kabur seperti "dengan baik", "sewajarnya", "secukupnya".
+
+FORMAT OUTPUT (JSON SAHAJA, tanpa teks lain):
+{
+  "ws": [
+    { "wsTitle": "...", "pc": "Telah ..." }
+  ]
+}
+`.trim();
+  }
+
+  // ====== parse JSON safely ======
+  function tryParseJson(text) {
+    if (!text) return null;
+    const t = String(text).trim();
+
+    // kadang model balas dengan ```json ... ```
+    const m = t.match(/```json([\s\S]*?)```/i);
+    const raw = m ? m[1].trim() : t;
+
+    try {
+      return JSON.parse(raw);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  // ====== fallback template jika AI gagal ======
+  function fallbackWsPc(waTitle, wsMin) {
+    // Template generik tetapi masih ikut rules (boleh ubah nanti)
+    const base = [
+      {
+        wsTitle: `Semak keperluan kerja bagi "${waTitle}" berdasarkan SOP/rekod berkaitan.`,
+        pc: `Keperluan kerja telah disemak dan direkodkan berdasarkan SOP/rekod yang berkaitan.`,
+      },
+      {
+        wsTitle: `Sediakan dokumen/borang/jadual pelaksanaan untuk "${waTitle}".`,
+        pc: `Dokumen/borang/jadual pelaksanaan telah disediakan lengkap dan boleh disemak.`,
+      },
+      {
+        wsTitle: `Laksanakan "${waTitle}" dan rekodkan pelaksanaan serta bukti kerja.`,
+        pc: `Pelaksanaan kerja telah direkodkan bersama bukti seperti laporan/rekod/borang yang berkaitan.`,
+      },
+      {
+        wsTitle: `Semak hasil pelaksanaan "${waTitle}" dan buat tindakan susulan jika perlu.`,
+        pc: `Hasil pelaksanaan telah disemak dan tindakan susulan telah direkodkan jika diperlukan.`,
+      },
+    ];
+    return base.slice(0, Math.max(3, wsMin));
+  }
+
+  // ====== generate waItems with AI ======
+  const waItems = [];
+
+  for (let i = 0; i < waItemsLocked.length; i++) {
+    const waIndex1 = i + 1;
+    const wa = waItemsLocked[i];
+
+    let wsRows = null;
+
+    // call AI
+    const prompt = buildPrompt({ cuTitle, waTitle: wa.waTitle, wsMin });
+    const llmText = await callLLM(prompt);
+    const parsed = tryParseJson(llmText);
+
+    if (parsed && Array.isArray(parsed.ws) && parsed.ws.length) {
+      wsRows = parsed.ws
+        .map((x) => ({
+          wsTitle: String(x?.wsTitle || "").trim(),
+          pc: String(x?.pc || "").trim(),
+        }))
+        .filter((x) => x.wsTitle && x.pc);
+
+      // enforce min ws
+      if (wsRows.length < wsMin) {
+        const extra = fallbackWsPc(wa.waTitle, wsMin - wsRows.length).map((x) => ({
+          wsTitle: x.wsTitle,
+          pc: x.pc,
+        }));
+        wsRows = wsRows.concat(extra).slice(0, wsMin);
+      }
+    } else {
+      // fallback
+      wsRows = fallbackWsPc(wa.waTitle, wsMin);
+    }
+
+    // enforce pcPerWs=1 (lock)
+    const ws = wsRows.slice(0, wsMin).map((row, j) => {
+      const wsIndex1 = j + 1;
+      const wsCode = makeWsCode(waIndex1, wsIndex1);
+
+      // ensure PC starts with "Telah"
+      let pc = String(row.pc || "").trim();
+      if (pc && !/^telah\b/i.test(pc)) pc = `Telah ${pc.replace(/^\s+/, "")}`;
+
+      return {
+        wsCode,
+        wsTitle: String(row.wsTitle || "").trim() || "xxx",
+        pc: pc || "Telah xxx",
+      };
+    });
+
+    waItems.push({
+      waCode: wa.waCode,
+      waTitle: wa.waTitle,
+      ws,
+    });
+  }
+
+  // Output draft yang boleh terus render Paparan 2
   return {
-    wsId: `${wa.waId || `WA${i + 1}`}-S${idx + 1}`,
-    wsNo,
-    wsText: tpl.ws,
-    pc: {
-      pcId: `${wa.waId || `WA${i + 1}`}-P${idx + 1}`,
-      pcNo: wsNo,
-      verb: pcAuto.verb,
-      object: pcAuto.object,
-      qualifier: pcAuto.qualifier,
-      pcText: pcAuto.pcText,
+    ok: true,
+    kind: "cpDraft",
+    sessionId,
+    lang: language,
+    generatedAt: nowIso,
+    cuCode,
+    cuTitle,
+    waItems,
+    rules: {
+      waLockedFromCpc: true,
+      wsMin,
+      pcPerWs,
+      pcStyle: "past_tense_ms",
+      measurable: true,
     },
   };
-});
-
-let workStepsPadded = padWorkStepsToMin({
-  lang,
-  wa,
-  waIndex: i,
-  workSteps,
-  minWS: 3,
-});
-
-return {
-  waId: wa.waId || `W${String(i + 1).padStart(2, "0")}`,
-  waCode: wa.waCode || wa.waId || "",
-  waTitle: wa.waTitle || "",
-  workSteps: workStepsPadded,
-};
-    }),
-    validation: { minRulesPassed: false, vocPassed: false, completenessPassed: false, issues: [] },
-    audit: { createdAt: nowISO(), createdBy: "AI", updatedAt: nowISO(), updatedBy: ["AI"], lockedAt: null, lockedBy: null },
-  };
-
-  return cp;
 }
 
 function validateCp(cp) {
   const issues = [];
 
-  const waCount = (cp?.workActivities || []).length;
-  if (waCount < 3) issues.push({ level: "ERROR", code: "MIN_WA", msg: "Setiap CU mesti ada sekurang-kurangnya 3 WA." });
+  // ---- Detect structure (new vs legacy) ----
+  const waItemsNew = Array.isArray(cp?.waItems) ? cp.waItems : null; // NEW (Paparan 2)
+  const waItemsLegacy = Array.isArray(cp?.workActivities) ? cp.workActivities : null; // LEGACY
+
+  // Normalize WA list
+  const waList = waItemsNew || waItemsLegacy || [];
+
+  const waCount = waList.length;
+
+  // NOTE: WA minimum ikut spec anda.
+  // Kalau anda nak "ikut CPC", boleh longgarkan, tapi saya kekalkan requirement asal (>=3).
+  if (waCount < 3) {
+    issues.push({
+      level: "ERROR",
+      code: "MIN_WA",
+      msg: "Setiap CU mesti ada sekurang-kurangnya 3 WA.",
+    });
+  }
 
   let minWsOk = true;
   let onePcOk = true;
+  let pastTenseOk = true;
 
-  for (const wa of cp?.workActivities || []) {
-    const ws = wa?.workSteps || [];
-    if (ws.length < 3) {
+  for (let i = 0; i < waList.length; i++) {
+    const wa = waList[i];
+
+    // NEW: wa.ws ; LEGACY: wa.workSteps
+    const wsList =
+      (Array.isArray(wa?.ws) && wa.ws) ||
+      (Array.isArray(wa?.workSteps) && wa.workSteps) ||
+      [];
+
+    const waTitle =
+      String(wa?.waTitle || wa?.title || wa?.name || wa?.waId || wa?.waCode || `WA#${i + 1}`).trim();
+
+    if (wsList.length < 3) {
       minWsOk = false;
-      issues.push({ level: "ERROR", code: "MIN_WS", msg: `WA "${wa?.waTitle || wa?.waId}" mesti ada sekurang-kurangnya 3 WS.` });
+      issues.push({
+        level: "ERROR",
+        code: "MIN_WS",
+        msg: `WA "${waTitle}" mesti ada sekurang-kurangnya 3 WS.`,
+      });
     }
-    for (const step of ws) {
-      if (!step?.pc) {
+
+    for (let j = 0; j < wsList.length; j++) {
+      const step = wsList[j];
+
+      // NEW: step.pc ; LEGACY: step.pc
+      const pc = String(step?.pc || step?.performanceCriteria || step?.criteria || "").trim();
+
+      const wsId =
+        String(step?.wsCode || step?.wsNo || step?.wsId || `${i + 1}.${j + 1}`).trim();
+
+      if (!pc) {
         onePcOk = false;
-        issues.push({ level: "ERROR", code: "MISSING_PC", msg: `WS "${step?.wsNo || step?.wsId}" mesti ada 1 PC.` });
+        issues.push({
+          level: "ERROR",
+          code: "MISSING_PC",
+          msg: `WS "${wsId}" mesti ada 1 PC.`,
+        });
+      } else {
+        // OPTIONAL (tapi sangat berguna): past tense "Telah ..."
+        // Jika anda nak wajib, kekalkan ERROR. Jika nak warning, tukar level ke "WARN".
+        if (!/^telah\b/i.test(pc)) {
+          pastTenseOk = false;
+          issues.push({
+            level: "WARN",
+            code: "PC_NOT_PAST_TENSE",
+            msg: `PC untuk WS "${wsId}" sebaiknya bermula dengan "Telah ..." (ayat past tense yang boleh diukur).`,
+          });
+        }
       }
     }
   }
 
   const minRulesPassed = waCount >= 3 && minWsOk && onePcOk;
+
+  return {
+    ok: minRulesPassed,
+    minRulesPassed,
+    issues,
+    stats: {
+      waCount,
+      minWsOk,
+      onePcOk,
+      pastTenseOk,
+      mode: waItemsNew ? "NEW_WAITEMS" : waItemsLegacy ? "LEGACY_WORKACTIVITIES" : "EMPTY",
+    },
+  };
+}
 
   // VOC
   let vocPassed = true;
@@ -1882,7 +2074,13 @@ app.post("/api/cp/draft", async (req, res) => {
       return res.status(404).json({ ok: false, error: "CU tidak ditemui dalam CPC (cuCode tidak match).", cuKey, hint: "Semak /api/cpc/:sessionId -> pastikan ada cus[].cuCode" });
     }
 
-    const cp = generateCpDraft({ sessionId, cpc, cu: cuFromCpc });
+    const cp = await generateCpDraft({
+      sessionId,
+      cpc,
+      cu: cuFromCpc,
+      ai: req.body?.ai || {},     // ambil rules dari frontend (optional)
+    });
+
     const validation = validateCp(cp);
     cp.validation = validation;
 
