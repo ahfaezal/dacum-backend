@@ -2023,33 +2023,6 @@ function validateCp(cp) {
   };
 }
 
-  // VOC
-  let vocPassed = true;
-  for (const wa of cp?.workActivities || []) {
-    for (const step of wa?.workSteps || []) {
-      const pc = step?.pc || {};
-      if (!String(pc?.verb || "").trim() || !String(pc?.object || "").trim() || !String(pc?.qualifier || "").trim()) {
-        vocPassed = false;
-        issues.push({ level: "ERROR", code: "VOC_FAIL", msg: `PC untuk WS "${step?.wsNo || step?.wsId}" mesti ada Verb+Object+Qualifier.` });
-      }
-    }
-  }
-
-  // Completeness (heuristik)
-  let completenessPassed = true;
-  for (const wa of cp?.workActivities || []) {
-    const text = (wa?.workSteps || []).map((s) => String(s?.wsText || "")).join(" ").toLowerCase();
-    const hasCheck = /(review|verify|validate|audit|semak|sahkan|validasi|pengesahan)/i.test(text);
-    const hasRecord = /(record|document|file|submit|report|rekod|dokumen|fail|serah|lapor|pemfailan)/i.test(text);
-    if (!hasCheck || !hasRecord) {
-      completenessPassed = false;
-      issues.push({ level: "WARNING", code: "WS_INCOMPLETE", msg: `WA "${wa?.waTitle || wa?.waId}" mungkin belum lengkap (tiada elemen semakan/pengesahan atau rekod/serahan).` });
-    }
-  }
-
-  return { minRulesPassed, vocPassed, completenessPassed, issues };
-
-
 /**
  * POST /api/cp/draft
  * Accept payload:
@@ -2424,36 +2397,6 @@ app.post("/api/myspike/index/build", async (req, res) => {
         }
       }
 
-const myspikeIndexStore = {}; // global / module-level
-
-app.post("/api/myspike/index/build", async (req, res) => {
-  const { sessionId } = req.body;
-  if (!sessionId) {
-    return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
-  }
-
-  const cus = getSessionCus(sessionId);
-  if (!cus || !cus.length) {
-    return res.status(400).json({ ok: false, error: "Tiada CU untuk bina index" });
-  }
-
-  // 🔑 bina embedding / index
-  const index = await buildMySpikeIndexFromCus(cus);
-
-  // 🔥 SIMPAN DI SINI
-  myspikeIndexStore[sessionId] = {
-    builtAt: Date.now(),
-    count: index.length,
-    index
-  };
-
-  return res.json({
-    ok: true,
-    sessionId,
-    total: index.length
-  });
-});
-      
       meta.lastPage = Math.max(meta.lastPage || 0, p);
     }
 
