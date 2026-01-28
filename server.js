@@ -110,7 +110,7 @@ app.use(express.json({ limit: "2mb" }));
 const S3_PREFIX = process.env.S3_PREFIX || "inoss/sessions";
 
 function s3KeyLiveboard(sessionId) {
-  const sid = String(sessionId || "").trim();
+  const sid = sanitizeSessionId(sessionId); // guna function sedia ada
   if (!sid) return "";
   return `${S3_PREFIX}/${sid}/liveboard.json`;
 }
@@ -126,7 +126,7 @@ function streamToString(stream) {
 
 async function s3Exists(key) {
   try {
-    await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+    await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET_INOSS, Key: key }));
     return true;
   } catch (e) {
     return false;
@@ -134,7 +134,7 @@ async function s3Exists(key) {
 }
 
 async function s3GetJson(key) {
-  const out = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+  const out = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET_INOSS, Key: key }));
   const text = await streamToString(out.Body);
   return JSON.parse(text || "{}");
 }
@@ -143,7 +143,7 @@ async function s3PutJson(key, data) {
   const body = JSON.stringify(data ?? {}, null, 2);
   await s3.send(
     new PutObjectCommand({
-      Bucket: S3_BUCKET,
+      Bucket: S3_BUCKET_INOSS,
       Key: key,
       Body: body,
       ContentType: "application/json",
@@ -156,27 +156,28 @@ async function s3PutJson(key, data) {
 // GET: load liveboard.json ikut session
 app.get("/api/liveboard/:sessionId", async (req, res) => {
   try {
-    const sid = String(req.params.sessionId || "").trim();
-    if (!sid) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+    const sidRaw = String(req.params.sessionId || "").trim();
+    if (!sidRaw) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
 
-    if (!S3_BUCKET) {
-      return res.status(500).json({ ok: false, error: "S3_BUCKET belum diset" });
+    if (!S3_BUCKET_INOSS) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET_INOSS belum diset" });
     }
 
-    const key = s3KeyLiveboard(sid);
-    const exists = await s3Exists(key);
+    const key = s3KeyLiveboard(sidRaw);
+    if (!key) return res.status(400).json({ ok: false, error: "S3 key tidak sah" });
 
+    const exists = await s3Exists(key);
     if (!exists) {
       return res.json({
         ok: true,
-        sessionId: sid,
+        sessionId: sidRaw,
         source: "default",
-        data: { sessionId: sid, cards: [], version: 1, lastUpdatedAt: null },
+        data: { sessionId: sidRaw, cards: [], version: 1, lastUpdatedAt: null },
       });
     }
 
     const data = await s3GetJson(key);
-    return res.json({ ok: true, sessionId: sid, source: "s3", data });
+    return res.json({ ok: true, sessionId: sidRaw, source: "s3", data });
   } catch (err) {
     console.error("GET /api/liveboard error:", err);
     return res.status(500).json({ ok: false, error: "Gagal load LiveBoard dari S3" });
@@ -186,25 +187,26 @@ app.get("/api/liveboard/:sessionId", async (req, res) => {
 // POST: save liveboard.json ikut session
 app.post("/api/liveboard/:sessionId", async (req, res) => {
   try {
-    const sid = String(req.params.sessionId || "").trim();
-    if (!sid) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+    const sidRaw = String(req.params.sessionId || "").trim();
+    if (!sidRaw) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
 
-    if (!S3_BUCKET) {
-      return res.status(500).json({ ok: false, error: "S3_BUCKET belum diset" });
+    if (!S3_BUCKET_INOSS) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET_INOSS belum diset" });
     }
 
-    const key = s3KeyLiveboard(sid);
-    const incoming = req.body?.data ?? req.body ?? {};
+    const key = s3KeyLiveboard(sidRaw);
+    if (!key) return res.status(400).json({ ok: false, error: "S3 key tidak sah" });
 
+    const incoming = req.body?.data ?? req.body ?? {};
     const dataToSave = {
       ...incoming,
-      sessionId: sid,
+      sessionId: sidRaw,
       version: Number(incoming?.version || 1),
       lastUpdatedAt: new Date().toISOString(),
     };
 
     await s3PutJson(key, dataToSave);
-    return res.json({ ok: true, sessionId: sid, saved: true, key });
+    return res.json({ ok: true, sessionId: sidRaw, saved: true, key });
   } catch (err) {
     console.error("POST /api/liveboard error:", err);
     return res.status(500).json({ ok: false, error: "Gagal simpan LiveBoard ke S3" });
