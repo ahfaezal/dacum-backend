@@ -28,10 +28,11 @@ const OpenAI = require("openai");
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ===== S3 (AWS SDK v3) =====
-const { S3Client, PutObjectCommand, GetObjectCommand } = require("@aws-sdk/client-s3");
+const { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } = require("@aws-sdk/client-s3");
 
 const S3_BUCKET_INOSS = process.env.S3_BUCKET_INOSS;
 const AWS_REGION = process.env.AWS_REGION || "ap-southeast-1";
+const S3_PREFIX_INOSS = process.env.S3_PREFIX || "inoss/sessions";
 
 function mustEnv(name) {
   const v = process.env[name];
@@ -106,18 +107,7 @@ app.use(express.json({ limit: "2mb" }));
  * POST /api/liveboard/:sessionId
  * ====================================================== */
 
-import {
-  S3Client,
-  GetObjectCommand,
-  PutObjectCommand,
-  HeadObjectCommand,
-} from "@aws-sdk/client-s3";
-
-const S3_BUCKET = process.env.S3_BUCKET;
-const AWS_REGION = process.env.AWS_REGION || "ap-southeast-1";
 const S3_PREFIX = process.env.S3_PREFIX || "inoss/sessions";
-
-const s3 = new S3Client({ region: AWS_REGION });
 
 function s3KeyLiveboard(sessionId) {
   const sid = String(sessionId || "").trim();
