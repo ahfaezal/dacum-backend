@@ -2226,6 +2226,36 @@ app.post("/api/myspike/index/build", async (req, res) => {
         }
       }
 
+const myspikeIndexStore = {}; // global / module-level
+
+app.post("/api/myspike/index/build", async (req, res) => {
+  const { sessionId } = req.body;
+  if (!sessionId) {
+    return res.status(400).json({ ok: false, error: "sessionId diperlukan" });
+  }
+
+  const cus = getSessionCus(sessionId);
+  if (!cus || !cus.length) {
+    return res.status(400).json({ ok: false, error: "Tiada CU untuk bina index" });
+  }
+
+  // 🔑 bina embedding / index
+  const index = await buildMySpikeIndexFromCus(cus);
+
+  // 🔥 SIMPAN DI SINI
+  myspikeIndexStore[sessionId] = {
+    builtAt: Date.now(),
+    count: index.length,
+    index
+  };
+
+  return res.json({
+    ok: true,
+    sessionId,
+    total: index.length
+  });
+});
+      
       meta.lastPage = Math.max(meta.lastPage || 0, p);
     }
 
