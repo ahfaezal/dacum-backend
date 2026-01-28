@@ -2378,10 +2378,20 @@ app.post("/api/s2/compare", async (req, res) => {
 
     await ensureMyspikeCuEmbeddings({ model: "text-embedding-3-small" });
 
-    const myItems = MYSPIKE_CU_ITEMS || [];
-    const myEmb = MYSPIKE_CU_EMB || [];
-    if (!myItems.length) {
-      return res.status(400).json({ error: "Index MySPIKE CU masih kosong. Sila bina index dulu: POST /api/myspike/index/build" });
+    const myItems = Array.isArray(MYSPIKE_CU_ITEMS) ? MYSPIKE_CU_ITEMS : [];
+    const myEmb = Array.isArray(MYSPIKE_CU_EMB) ? MYSPIKE_CU_EMB : [];
+
+    if (!myItems.length || !myEmb.length || myItems.length !== myEmb.length) {
+      return res.status(400).json({
+        ok: false,
+        error:
+          "Index MySPIKE CU masih kosong / tidak lengkap. Sila bina index dulu: POST /api/myspike/index/build",
+        debug: {
+          items: myItems.length,
+          emb: myEmb.length,
+          match: myItems.length === myEmb.length,
+        },
+      });
     }
 
     const cuTexts = list.map(buildCuText);
