@@ -426,6 +426,72 @@ function getCardText(card) {
   ).trim();
 }
 
+
+/**
+ * Sync cards daripada LiveBoard (S3) -> sessions[sid].cards (memory)
+ * Tujuan: Cluster Page perlu nampak kad yang panel masukkan di Live Board.
+ * NOTE: LiveBoard sekarang simpan di S3 (liveboard.json). Cluster sebelum ini baca dari memory sahaja.
+ */
+async function syncSessionCardsFromS3(sessionId) {
+  try {
+    const sid = String(sessionId || "").trim();
+    if (!sid) return { ok: false, reason: "no_session" };
+
+    // kalau env S3 tak set, skip (kekal guna memory)
+    if (!S3_BUCKET_INOSS) return { ok: false, reason: "no_s3_bucket" };
+
+    const key = s3KeyLiveboard(sid);
+    if (!key) return { ok: false, reason: "bad_key" };
+
+    // jika file tak wujud lagi, skip
+    const exists = await s3Exists(key);
+    if (!exists) return { ok: false, reason: "no_liveboard_file" };
+
+    const board = await s3GetJson(key);
+    const list = Array.isArray(board?.cards) ? board.cards : [];
+    if (!list.length) return { ok: true, imported: 0 };
+
+    // convert bentuk kad S3 -> bentuk kad memory yang digunakan oleh clustering/CPC
+    const mapped = list
+      .map((c, idx) => {
+        const activity = String(
+          c?.activity || c?.text || c?.name || c?.title || c?.waTitle || ""
+        ).trim();
+        if (!activity) return null;
+        const id = c?.id ?? `${Date.now()}-${idx}`;
+        return {
+          id,
+          name: String(c?.panelName || c?.name || "Panel").trim(),
+          activity,
+          time: String(c?.time || c?.createdAt || c?.timestamp || nowISO()),
+          // simpan asal untuk audit/debug
+          _src: "s3-liveboard",
+        };
+      })
+      .filter(Boolean);
+
+    // merge: elak duplicate ikut id
+    const s = ensureSession(sid);
+    const existing = Array.isArray(s.cards) ? s.cards : [];
+    const seen = new Set(existing.map((c) => String(c.id)));
+    const merged = [...existing];
+
+    for (const c of mapped) {
+      const keyId = String(c.id);
+      if (seen.has(keyId)) continue;
+      merged.push(c);
+      seen.add(keyId);
+    }
+
+    setSessionCards(sid, merged);
+    return { ok: true, imported: mapped.length, total: merged.length };
+  } catch (e) {
+    console.warn("syncSessionCardsFromS3 failed:", e?.message || e);
+    return { ok: false, reason: "error", detail: String(e?.message || e) };
+  }
+}
+
+
 /* =========================
  * Socket.IO rooms
  * ========================= */
@@ -1115,6 +1181,9 @@ app.post("/api/cluster/run", async (req, res) => {
 
     const s = ensureSession(sid);
     if (!s) return res.status(400).json({ error: "sessionId tidak sah" });
+
+    // ✅ penting: tarik kad terbaru dari LiveBoard (S3) jika ada
+    await syncSessionCardsFromS3(sid);
 
     const items = getSessionCards(sid);
     if (items.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
@@ -2323,7 +2392,8 @@ app.get("/debug/openai", async (req, res) => {
 });
 
 /* ======================================================
- * 3) AI CLUSTER (REAL) - ROUTE BARU: /api/cluster/run/:sessionId
+ * 3) AI CLUSTER (REAL) - COMPAT ROUTE: /api/cluster/run/:sessionId
+ *    (frontend baru cuba endpoint ini dahulu)
  * ====================================================== */
 app.post("/api/cluster/run/:sessionId", async (req, res) => {
   try {
@@ -2333,24 +2403,16 @@ app.post("/api/cluster/run/:sessionId", async (req, res) => {
     const s = ensureSession(sid);
     if (!s) return res.status(400).json({ error: "sessionId tidak sah" });
 
+    // ✅ penting: tarik kad terbaru dari LiveBoard (S3) jika ada
+    await syncSessionCardsFromS3(sid);
+
     const items = getSessionCards(sid);
-    if (!items || items.length < 5)
-      return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
+    if (items.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
 
-    if (!process.env.OPENAI_API_KEY)
-      return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
+    if (!process.env.OPENAI_API_KEY) return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
 
-    const cards = items
-      .map(c => ({ id: c.id, activity: getCardText(c) }));
-
-    console.log("CLUSTER DEBUG:", {
-      totalItems: items.length,
-      withText: cards.filter(c => c.activity).length,
-      sample: cards.slice(0, 5)
-    });
-    
-    if (cards.length < 5)
-      return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+    const cards = items.map((c) => ({ id: c.id, activity: getCardText(c) })).filter((c) => c.activity);
+    if (cards.length < 5) return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
 
     const lang = String(s.lang || "MS").toUpperCase(); // "MS" | "EN"
 
@@ -2361,11 +2423,82 @@ app.post("/api/cluster/run/:sessionId", async (req, res) => {
       s.updatedAt = s.lockedAt;
     }
 
-    // ✅ guna fungsi clustering yang sama seperti route lama anda
-    const result = await runAiClustering(cards, { lang });
+    const langRule =
+      lang === "EN"
+        ? [
+            "Cluster titles MUST be in English (EN).",
+            "Even if activity text is mixed Malay/English, the cluster title MUST remain English.",
+            "Use concise titles (2–6 words).",
+          ].join("\n")
+        : [
+            "Tajuk kluster MESTI dalam Bahasa Melayu (MS).",
+            "Walaupun teks aktiviti bercampur BM/EN, tajuk kluster MESTI kekal Bahasa Melayu.",
+            "Tajuk ringkas (2–6 perkataan).",
+          ].join("\n");
+
+    const prompt = `
+You are a DACUM facilitator.
+Task: Cluster work activities into logical CU groups.
+
+Output must be JSON ONLY, format:
+{
+  "clusters":[{"title":"...","cardIds":[1,2,3]}],
+  "unassigned":[]
+}
+
+Rules:
+- Number of clusters: 4 to 12 (as appropriate).
+- Each cardId must appear in ONLY ONE cluster.
+- If an activity is too general/odd, put it into unassigned.
+- ${langRule}
+
+Activities:
+${cards.map((c) => `(${c.id}) ${c.activity}`).join("\n")}
+`.trim();
+
+    const out = await client.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.2,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "Return JSON only." },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    const raw = out?.choices?.[0]?.message?.content || "{}";
+    let parsed;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      parsed = null;
+    }
+
+    if (!parsed || !Array.isArray(parsed.clusters)) {
+      return res.status(500).json({ error: "Output AI tidak sah", raw });
+    }
+
+    const clusters = parsed.clusters
+      .map((cl) => ({
+        title: String(cl?.title || "").trim(),
+        cardIds: Array.isArray(cl?.cardIds) ? cl.cardIds : [],
+      }))
+      .filter((cl) => cl.title && cl.cardIds.length);
+
+    const unassigned = Array.isArray(parsed.unassigned) ? parsed.unassigned : [];
+
+    const result = {
+      ok: true,
+      sessionId: sid,
+      lang,
+      langLocked: !!s.langLocked,
+      lockedAt: s.lockedAt || null,
+      generatedAt: nowISO(),
+      clusters,
+      unassigned,
+    };
 
     clusterStore[sid] = result;
-
     return res.json(result);
   } catch (e) {
     console.error("cluster run/:sessionId error:", e);
@@ -2374,6 +2507,7 @@ app.post("/api/cluster/run/:sessionId", async (req, res) => {
 });
 
 /* =========================
+ * SERVER START (PALING BAWAH)/* =========================
  * SERVER START (PALING BAWAH)
  * ========================= */
 const PORT = process.env.PORT || 10000;
