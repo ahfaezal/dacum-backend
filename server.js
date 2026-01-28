@@ -100,6 +100,127 @@ const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
 
+/* ======================================================
+ * LIVEBOARD (S3) — ikut SESSION
+ * GET  /api/liveboard/:sessionId
+ * POST /api/liveboard/:sessionId
+ * ====================================================== */
+
+import {
+  S3Client,
+  GetObjectCommand,
+  PutObjectCommand,
+  HeadObjectCommand,
+} from "@aws-sdk/client-s3";
+
+const S3_BUCKET = process.env.S3_BUCKET;
+const AWS_REGION = process.env.AWS_REGION || "ap-southeast-1";
+const S3_PREFIX = process.env.S3_PREFIX || "inoss/sessions";
+
+const s3 = new S3Client({ region: AWS_REGION });
+
+function s3KeyLiveboard(sessionId) {
+  const sid = String(sessionId || "").trim();
+  if (!sid) return "";
+  return `${S3_PREFIX}/${sid}/liveboard.json`;
+}
+
+function streamToString(stream) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    stream.on("data", (chunk) => chunks.push(chunk));
+    stream.on("error", reject);
+    stream.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+  });
+}
+
+async function s3Exists(key) {
+  try {
+    await s3.send(new HeadObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+async function s3GetJson(key) {
+  const out = await s3.send(new GetObjectCommand({ Bucket: S3_BUCKET, Key: key }));
+  const text = await streamToString(out.Body);
+  return JSON.parse(text || "{}");
+}
+
+async function s3PutJson(key, data) {
+  const body = JSON.stringify(data ?? {}, null, 2);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: S3_BUCKET,
+      Key: key,
+      Body: body,
+      ContentType: "application/json",
+      CacheControl: "no-store",
+    })
+  );
+  return true;
+}
+
+// GET: load liveboard.json ikut session
+app.get("/api/liveboard/:sessionId", async (req, res) => {
+  try {
+    const sid = String(req.params.sessionId || "").trim();
+    if (!sid) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+    if (!S3_BUCKET) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET belum diset" });
+    }
+
+    const key = s3KeyLiveboard(sid);
+    const exists = await s3Exists(key);
+
+    if (!exists) {
+      return res.json({
+        ok: true,
+        sessionId: sid,
+        source: "default",
+        data: { sessionId: sid, cards: [], version: 1, lastUpdatedAt: null },
+      });
+    }
+
+    const data = await s3GetJson(key);
+    return res.json({ ok: true, sessionId: sid, source: "s3", data });
+  } catch (err) {
+    console.error("GET /api/liveboard error:", err);
+    return res.status(500).json({ ok: false, error: "Gagal load LiveBoard dari S3" });
+  }
+});
+
+// POST: save liveboard.json ikut session
+app.post("/api/liveboard/:sessionId", async (req, res) => {
+  try {
+    const sid = String(req.params.sessionId || "").trim();
+    if (!sid) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+    if (!S3_BUCKET) {
+      return res.status(500).json({ ok: false, error: "S3_BUCKET belum diset" });
+    }
+
+    const key = s3KeyLiveboard(sid);
+    const incoming = req.body?.data ?? req.body ?? {};
+
+    const dataToSave = {
+      ...incoming,
+      sessionId: sid,
+      version: Number(incoming?.version || 1),
+      lastUpdatedAt: new Date().toISOString(),
+    };
+
+    await s3PutJson(key, dataToSave);
+    return res.json({ ok: true, sessionId: sid, saved: true, key });
+  } catch (err) {
+    console.error("POST /api/liveboard error:", err);
+    return res.status(500).json({ ok: false, error: "Gagal simpan LiveBoard ke S3" });
+  }
+});
+
 /* =========================
  * SERVER + SOCKET (MESTI DI ATAS)
  * ========================= */
