@@ -2322,6 +2322,52 @@ app.get("/debug/openai", async (req, res) => {
   }
 });
 
+/* ======================================================
+ * 3) AI CLUSTER (REAL) - ROUTE BARU: /api/cluster/run/:sessionId
+ * ====================================================== */
+app.post("/api/cluster/run/:sessionId", async (req, res) => {
+  try {
+    const sid = String(req.params.sessionId || "").trim();
+    if (!sid) return res.status(400).json({ error: "sessionId diperlukan" });
+
+    const s = ensureSession(sid);
+    if (!s) return res.status(400).json({ error: "sessionId tidak sah" });
+
+    const items = getSessionCards(sid);
+    if (!items || items.length < 5)
+      return res.status(400).json({ error: "Terlalu sedikit kad untuk clustering (min 5)" });
+
+    if (!process.env.OPENAI_API_KEY)
+      return res.status(500).json({ error: "OPENAI_API_KEY belum diset" });
+
+    const cards = items
+      .map((c) => ({ id: c.id, activity: getCardText(c) }))
+      .filter((c) => c.activity);
+
+    if (cards.length < 5)
+      return res.status(400).json({ error: "Terlalu sedikit kad yang ada teks (min 5)" });
+
+    const lang = String(s.lang || "MS").toUpperCase(); // "MS" | "EN"
+
+    // Auto-lock bila run cluster
+    if (!s.langLocked) {
+      s.langLocked = true;
+      s.lockedAt = nowISO();
+      s.updatedAt = s.lockedAt;
+    }
+
+    // ✅ guna fungsi clustering yang sama seperti route lama anda
+    const result = await runAiClustering(cards, { lang });
+
+    clusterStore[sid] = result;
+
+    return res.json(result);
+  } catch (e) {
+    console.error("cluster run/:sessionId error:", e);
+    return res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
 /* =========================
  * SERVER START (PALING BAWAH)
  * ========================= */
