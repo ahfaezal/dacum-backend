@@ -2048,7 +2048,7 @@ function validateCp(cp) {
   }
 
   return { minRulesPassed, vocPassed, completenessPassed, issues };
-}
+
 
 /**
  * POST /api/cp/draft
