@@ -611,6 +611,28 @@ app.post("/api/session/lock/:sessionId", (req, res) => {
   });
 });
 
+/* ======================================================
+ * SESSION UNLOCK (Fasilitator sahaja)
+ * ====================================================== */
+app.post("/api/session/unlock/:sessionId", (req, res) => {
+  const sid = String(req.params.sessionId || "").trim();
+  const s = ensureSession(sid);
+  if (!s) return res.status(400).json({ ok: false, error: "sessionId tidak sah" });
+
+  // buka kunci
+  s.langLocked = false;
+  s.lockedAt = null;
+  s.updatedAt = nowISO();
+
+  return res.json({
+    ok: true,
+    sessionId: sid,
+    lang: String(s.lang || "MS").toUpperCase(),
+    langLocked: false,
+    unlockedAt: s.updatedAt,
+  });
+});
+
 // ===============================
 // SESSION CUS (untuk ClusterPage "Reload CU (cus)")
 // ===============================
