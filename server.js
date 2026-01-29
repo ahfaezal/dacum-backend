@@ -744,15 +744,33 @@ app.get("/api/session/cus", (req, res) => {
 // ======================================================
 // CP AI: Seed Work Steps (WS) + Performance Criteria (PC)
 // POST /api/cp/ai/seed-ws
-// Body: { sessionId, cuCode, cuTitle, waList: [string], wsPerWa?: number }
+// Body: { sessionId, cuCode, cuTitle, waList: [string|{waCode,waTitle}], wsPerWa?: number }
 // ======================================================
 app.post("/api/cp/ai/seed-ws", async (req, res) => {
   try {
     const sessionId = String(req.body?.sessionId || "").trim();
     const cuCode = String(req.body?.cuCode || req.body?.cuId || "").trim().toLowerCase();
     const cuTitle = String(req.body?.cuTitle || "").trim();
-    const waList = Array.isArray(req.body?.waList) ? req.body.waList : [];
+
+    // wsPerWa: min 3, max 7
     const wsPerWa = Math.min(7, Math.max(3, Number(req.body?.wsPerWa || 5)));
+
+    // ✅ waList boleh jadi array string ATAU array objek
+    const rawWaList = Array.isArray(req.body?.waList) ? req.body.waList : [];
+    const waList = rawWaList
+      .map((x, i) => {
+        if (typeof x === "string") {
+          return { waCode: `w${String(i + 1).padStart(2, "0")}`, waTitle: String(x).trim() };
+        }
+        if (x && typeof x === "object") {
+          const waCode = String(x.waCode || x.waId || x.id || x.code || `w${String(i + 1).padStart(2, "0")}`).trim();
+          const waTitle = String(x.waTitle || x.title || x.name || `WA${i + 1}`).trim();
+          return { waCode: waCode.toLowerCase(), waTitle };
+        }
+        return null;
+      })
+      .filter(Boolean)
+      .filter((w) => w.waTitle);
 
     if (!sessionId || !cuCode) {
       return res.status(400).json({ ok: false, error: "sessionId / cuCode tidak sah" });
@@ -826,35 +844,46 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
       return s;
     }
 
+    function ensurePeriod(s = "") {
+      const t = String(s || "").trim();
+      if (!t) return "";
+      return /[.!?]$/.test(t) ? t : t + ".";
+    }
+
+    function stripLeadingTelah(s = "") {
+      return String(s || "").trim().replace(/^\s*telah\s+/i, "");
+    }
+
     // ----------------------------
     // Fallback generator (no AI)
     // ----------------------------
-    function fallbackSeed(waTitle, idx) {
+    function fallbackSeedOneWa(waTitle, idx, waCode) {
+      // fallback ini generik, tetapi hanya digunakan bila AI gagal
       const base = [
         {
           ws: "Kenal pasti keperluan dan persediaan awal.",
-          pc: "Keperluan dan persediaan awal telah dikenalpasti berdasarkan keperluan operasi.",
+          pc: "Keperluan dan persediaan awal dikenal pasti berdasarkan keperluan operasi.",
         },
         {
-          ws: "Sediakan peralatan dan bahan mengikut SOP.",
-          pc: "Peralatan dan bahan telah disediakan mengikut prosedur operasi standard yang ditetapkan.",
+          ws: "Sediakan sumber, peralatan dan bahan mengikut keperluan.",
+          pc: "Sumber, peralatan dan bahan disediakan mengikut keperluan yang ditetapkan.",
         },
         {
-          ws: "Laksanakan langkah kerja mengikut turutan.",
-          pc: "Langkah kerja telah dilaksanakan mengikut turutan yang ditetapkan dengan tepat.",
+          ws: "Laksanakan aktiviti mengikut perancangan.",
+          pc: "Aktiviti dilaksanakan mengikut perancangan dan garis panduan yang ditetapkan.",
         },
         {
-          ws: "Semak hasil kerja dan buat pembetulan jika perlu.",
-          pc: "Hasil kerja telah disemak dan pembetulan dibuat bagi memastikan pematuhan keperluan.",
+          ws: "Semak hasil dan buat penambahbaikan jika perlu.",
+          pc: "Hasil disemak dan penambahbaikan dibuat bagi memastikan pematuhan keperluan.",
         },
         {
-          ws: "Rekod dan laporkan pelaksanaan.",
-          pc: "Pelaksanaan kerja telah direkod dan dilaporkan mengikut sistem pelaporan yang ditetapkan.",
+          ws: "Sediakan rekod dan laporan pelaksanaan.",
+          pc: "Rekod dan laporan pelaksanaan disediakan serta boleh disemak.",
         },
       ].slice(0, wsPerWa);
 
       return {
-        waId: "",
+        waId: String(waCode || "").trim(),
         waTitle: waTitle || `WA${idx + 1}`,
         workSteps: base.map((item, i) => ({
           wsId: "",
@@ -864,101 +893,177 @@ app.post("/api/cp/ai/seed-ws", async (req, res) => {
             verb: "",
             object: "",
             qualifier: "",
-            pcText: item.pc, // ✅ past tense, outcome-based
+            pcText: ensurePeriod(item.pc),
           },
         })),
       };
     }
 
     // ----------------------------
-    // AI call (optional)
+    // WA-aware prompt (per WA)
     // ----------------------------
-    const prompt = {
-      role: "user",
-      content: `
-Anda penulis standard kerja NOSS. Hasilkan WS dan PC (past tense, outcome-based) dalam Bahasa Malaysia.
-Pastikan PC menunjukkan hasil WS, bukan arahan.
+    function buildPromptPerWa({ cuCode, cuTitle, wa, waIdx, wsPerWa }) {
+      return `
+Anda penulis standard kerja NOSS (JPK). Jana Work Step (WS) dan Performance Criteria (PC) untuk SATU Work Activity (WA) sahaja dalam Bahasa Malaysia.
 
 CU: ${cuCode} — ${cuTitle}
-WA List:
-${waList.map((x, i) => `${i + 1}) ${x}`).join("\n")}
+WA ${waIdx + 1}: (${wa.waCode}) ${wa.waTitle}
 
-Pulangkan JSON SAHAJA dengan format:
+PERATURAN WAJIB:
+1) Jana tepat ${wsPerWa} WS untuk WA ini.
+2) WS mesti KHUSUS kepada WA ini (bukan template umum).
+   - Elakkan pola berulang seperti: "Semak keperluan / Sediakan dokumen / Laksana & rekod" kecuali WA memang memerlukan.
+3) WS ringkas (kata kerja + objek), jangan ulang tajuk WA.
+4) PC mesti boleh diukur (audit/checklist), ayat pasif BM formal. Jangan mula ayat dengan "Telah".
+5) PC menerangkan hasil kepada WS (outcome), bukan arahan.
+
+OUTPUT JSON SAHAJA:
 {
-  "workActivities": [
-    {
-      "waTitle": "...",
-      "workSteps": [
-        { "wsNo":"1.1", "wsText":"...", "pc":{ "verb":"...", "object":"...", "qualifier":"...", "pcText":"..." } }
-      ]
-    }
+  "workSteps": [
+    { "wsText": "...", "pcText": "..." }
   ]
 }
-Tiada teks lain selain JSON.
-`.trim(),
-    };
+Tiada teks selain JSON.
+`.trim();
+    }
+
+    async function callAiPerWa(promptText) {
+      const out = await client.chat.completions.create({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        temperature: 0.2, // lebih stabil, kurang template
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "JSON sahaja." },
+          { role: "user", content: promptText },
+        ],
+      });
+
+      const raw = out?.choices?.[0]?.message?.content || "{}";
+      return raw;
+    }
 
     // Jika tiada API key, terus fallback (supaya deploy tak fail)
     if (!process.env.OPENAI_API_KEY) {
-      const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-      return res.json({ ok: true, mode: "fallback_no_key", workActivities });
+      const workActivities = waList.map((wa, idx) => fallbackSeedOneWa(wa.waTitle, idx, wa.waCode));
+      return res.json({
+        ok: true,
+        mode: "fallback_no_key",
+        workActivities,
+        // bonus: format yang frontend baru suka
+        cpDraft: {
+          sessionId,
+          cuCode,
+          cuTitle,
+          generatedAt: new Date().toISOString(),
+          waItems: workActivities.map((w) => ({
+            waCode: w.waId || "",
+            waTitle: w.waTitle,
+            ws: (w.workSteps || []).map((s) => ({
+              wsCode: s.wsNo,
+              wsTitle: s.wsText,
+              pc: s.pc?.pcText || "",
+            })),
+          })),
+        },
+      });
     }
 
-const out = await client.chat.completions.create({
-  model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-  temperature: 0.3,
-  response_format: { type: "json_object" },
-  messages: [
-    { role: "system", content: "JSON sahaja." },
-    prompt,
-  ],
-});
+    // =========================
+    // ✅ WA-aware generation
+    // =========================
+    const workActivities = [];
 
-const raw = out?.choices?.[0]?.message?.content || "{}";
+    for (let waIdx = 0; waIdx < waList.length; waIdx++) {
+      const wa = waList[waIdx];
 
-let parsed;
-try {
-  parsed = JSON.parse(raw);
-} catch (e) {
-  const workActivities = waList.map((waTitle, idx) => fallbackSeed(waTitle, idx));
-  return res.json({ ok: true, mode: "fallback_bad_json", note: raw, workActivities });
-}
-    
-    const workActivities = Array.isArray(parsed?.workActivities) ? parsed.workActivities : [];
+      let parsed;
+      try {
+        const promptText = buildPromptPerWa({ cuCode, cuTitle, wa, waIdx, wsPerWa });
+        const raw = await callAiPerWa(promptText);
 
-    // Post-process: pastify pcText (kalau AI bagi EN / bukan past tense)
-    const normalized = workActivities.map((wa, waIdx) => ({
-      waId: "",
-      waTitle: String(wa?.waTitle || waList[waIdx] || `WA${waIdx + 1}`).trim(),
-      workSteps: Array.isArray(wa?.workSteps)
-        ? wa.workSteps.slice(0, wsPerWa).map((ws, i) => {
-            const pcTextRaw = String(ws?.pc?.pcText || "").trim();
-            // jika nampak english passive, convert; kalau sudah BM elok, biar
-            const pcText = /has been|have been|was |were |in accordance with|according to/i.test(pcTextRaw)
-              ? msPastify(pcTextRaw)
-              : (pcTextRaw && !/[.!?]$/.test(pcTextRaw) ? pcTextRaw + "." : pcTextRaw);
+        parsed = JSON.parse(raw);
+      } catch (e) {
+        // fallback untuk WA ini sahaja
+        workActivities.push(fallbackSeedOneWa(wa.waTitle, waIdx, wa.waCode));
+        continue;
+      }
 
-            return {
-              wsId: "",
-              wsNo: ws?.wsNo || `${waIdx + 1}.${i + 1}`,
-              wsText: String(ws?.wsText || "").trim(),
-              pc: {
-                verb: String(ws?.pc?.verb || "").trim(),
-                object: String(ws?.pc?.object || "").trim(),
-                qualifier: String(ws?.pc?.qualifier || "").trim(),
-                pcText: pcText || fallbackSeed("", waIdx).workSteps[i]?.pc?.pcText || "",
-              },
-            };
-          })
-        : fallbackSeed("", waIdx).workSteps,
-    }));
+      const wsArr = Array.isArray(parsed?.workSteps) ? parsed.workSteps : [];
+      if (!wsArr.length) {
+        workActivities.push(fallbackSeedOneWa(wa.waTitle, waIdx, wa.waCode));
+        continue;
+      }
 
-    return res.json({ ok: true, mode: "ai", workActivities: normalized });
+      const fixedSteps = wsArr.slice(0, wsPerWa).map((s, i) => {
+        const wsText = String(s?.wsText || "").trim();
+        let pcTextRaw = String(s?.pcText || "").trim();
+
+        // jika nampak english passive, convert; kalau sudah BM elok, biar
+        const pcText = /has been|have been|was |were |in accordance with|according to/i.test(pcTextRaw)
+          ? msPastify(pcTextRaw)
+          : ensurePeriod(stripLeadingTelah(pcTextRaw));
+
+        return {
+          wsId: "",
+          wsNo: `${waIdx + 1}.${i + 1}`,
+          wsText: wsText || fallbackSeedOneWa("", waIdx, wa.waCode).workSteps[i]?.wsText || "",
+          pc: {
+            verb: "",
+            object: "",
+            qualifier: "",
+            pcText: pcText || fallbackSeedOneWa("", waIdx, wa.waCode).workSteps[i]?.pc?.pcText || "",
+          },
+        };
+      });
+
+      // jika kurang daripada wsPerWa, topup daripada fallback supaya cukup
+      while (fixedSteps.length < wsPerWa) {
+        const i = fixedSteps.length;
+        const fb = fallbackSeedOneWa("", waIdx, wa.waCode).workSteps[i];
+        fixedSteps.push(fb);
+      }
+
+      workActivities.push({
+        waId: String(wa.waCode || "").trim(),
+        waTitle: String(wa.waTitle || `WA${waIdx + 1}`).trim(),
+        workSteps: fixedSteps,
+      });
+    }
+
+    // =========================
+    // Response: kekal serasi + tambah cpDraft
+    // =========================
+    const normalized = workActivities;
+
+    return res.json({
+      ok: true,
+      mode: "ai_per_wa",
+      workActivities: normalized,
+
+      // bonus: format yang frontend CpDashboard.jsx boleh guna terus
+      cpDraft: {
+        ok: true,
+        kind: "cpDraft",
+        sessionId,
+        lang: "MS",
+        generatedAt: new Date().toISOString(),
+        cuCode,
+        cuTitle,
+        waItems: normalized.map((w) => ({
+          waCode: w.waId || "",
+          waTitle: w.waTitle,
+          ws: (w.workSteps || []).map((s) => ({
+            wsCode: s.wsNo,
+            wsTitle: s.wsText,
+            pc: s.pc?.pcText || "",
+          })),
+        })),
+      },
+    });
   } catch (e) {
     return res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
-
 
 // ===============================
 // EN -> MS (rules ringan, stabil)
